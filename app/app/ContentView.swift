@@ -119,8 +119,8 @@ struct ChatView: View {
                     .padding(.horizontal)
                     .padding(.top) // Add padding at the top of the messages list
                 }
-                // Set background of the scrollable content area to white
-                .background(Color.white)
+                // Set background of the scrollable content area to the system window background color
+                .background(Color(NSColor.windowBackgroundColor))
                 .onChange(of: messages) { oldValue, newValue in // Observe the whole array for changes
                     // Ensure scrolling happens only when count increases and the last message is new
                     if newValue.count > oldValue.count, let lastMessage = newValue.last { 
@@ -132,17 +132,12 @@ struct ChatView: View {
                 }
             }
 
-            Divider() // Add a divider above the input area
-
             // Input area
-            HStack(spacing: 10) { // Adjust spacing in input HStack
+            HStack(spacing: 10) { // Container for TextField and Button
                 TextField("Ask anything...", text: $newMessageText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .frame(minHeight: 30)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
-                    .background(Color(.textBackgroundColor))
-                    .cornerRadius(8)
+                    // Remove specific TextField styling (background, clip, overlay)
 
                 Button(action: sendMessage) {
                     Image(systemName: "arrow.up.circle.fill")
@@ -151,10 +146,23 @@ struct ChatView: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(newMessageText.isEmpty)
+                .frame(minHeight: 30) // Align height with TextField
             }
-            .padding()
-            .background(.regularMaterial)
+            // Apply styling to the HStack to create the 'island'
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color.gray.opacity(0.1))
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+            )
+            .padding(.horizontal, 20) // Padding outside the island for centering
+            .padding(.bottom, 10) // Padding below the island
+            .frame(maxWidth: 800) // Keep the max width constraint
         }
+        // Set the background of the entire VStack to the system window background color
+        .background(Color(NSColor.windowBackgroundColor))
         // Use the selected chat title if available, otherwise default
         .navigationTitle(historyItem?.title ?? "Chatbot")
     }
