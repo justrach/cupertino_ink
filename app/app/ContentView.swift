@@ -39,11 +39,11 @@ struct ContentView: View {
     @State private var searchText = ""
     // State to manage chat history filtering (if implementing search)
     // @State private var filteredChatHistory = mockChatHistory
-    @State private var contentVisible = false // State for fade-in
+    @State private var contentVisible = false // State for fade-in - RESTORED
 
     var body: some View {
-        ZStack { // Wrap in ZStack for fade-in from black
-            // Background that starts as black
+        ZStack { // Wrap in ZStack for fade-in from black - RESTORED
+            // Background that starts as black - RESTORED
             Color.black.edgesIgnoringSafeArea(.all)
 
             // Your existing NavigationView
@@ -73,38 +73,15 @@ struct ContentView: View {
                 // No longer need to pass binding
                 ChatView()
             }
-            // Add the main toolbar to the NavigationView
-            .toolbar {
-                // Group buttons for better layout control if needed
-                ToolbarItemGroup(placement: .navigation) { // Primary actions group
-                     Button {
-                        // Use the standard macOS action to toggle the sidebar
-                        toggleSidebar()
-                    } label: {
-                        Image(systemName: "sidebar.left")
-                    }
-                    
-                    Button {
-                        // Placeholder action for creating a new chat
-                        print("New Chat button tapped")
-                        // TODO: Implement new chat logic
-                    } label: {
-                        Image(systemName: "square.and.pencil")
-                    }
-                }
-            }
             .frame(minWidth: 600, minHeight: 400)
-            // Apply fade-in effect to the NavigationView
+            // Apply fade-in effect to the NavigationView - RESTORED
             .opacity(contentVisible ? 1 : 0)
-            .background( // Set the actual background color of the content area
-                 // Use system background for adaptability, but it will fade in over black
+            .background( // Set the actual background color of the content area - RESTORED
                  Color(NSColor.windowBackgroundColor)
             )
         }
-        // Add onAppear to trigger the fade-in
+        // Add onAppear to trigger the fade-in - RESTORED
         .onAppear {
-            // Add a very short delay before starting the fade-in
-            // to ensure the black background is present first.
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
                 withAnimation(.easeInOut(duration: 0.6)) {
                     contentVisible = true

@@ -1,28 +1,30 @@
 import SwiftUI
-import Combine // For Timer
+import Combine
+
+// Define the custom color
+let hdrCoralBlue = Color(red: 0.1, green: 0.7, blue: 0.9)
 
 struct SplashScreenView: View {
-    // State to control the overall visibility and animation progress
-    @State private var isActive: Bool = false
+    // State to control the text visibility/animation
     @State private var showText: Bool = false
-    @State private var startDissolve: Bool = false
-    @State private var animationTime: Float = 0.0 // Drives the Metal shader
+    @State private var fadeOutText: Bool = false
 
     // Callback to notify the main app when the splash is finished
     var onFinished: () -> Void
 
     // Animation timings
-    let textFadeInDuration: Double = 0.5
+    let textFadeInDuration: Double = 0.6
     let textDisplayDuration: Double = 1.5
-    let dissolveDuration: Double = 1.5 // Duration for the dissolve effect (0.0 to 1.0)
-    let totalDurationBeforeFinish: Double = 0.5 // Extra time after dissolve finishes
+    let textFadeOutDuration: Double = 0.6
+    let totalDurationBeforeFinish: Double = 0.2 // Short pause after fade out
 
     var body: some View {
         ZStack {
-            // Background color for the whole splash screen
-            Color.black.edgesIgnoringSafeArea(.all)
+            // Metal View for the HDR background
+            MetalViewRepresentable()
+                .edgesIgnoringSafeArea(.all)
 
-            // Text Overlay - Mask will be applied here
+            // Text Overlay
             VStack(spacing: 0) {
                 Text("welcome to")
                     .font(.system(size: 24, weight: .light))
@@ -34,49 +36,29 @@ struct SplashScreenView: View {
                     .textCase(.lowercase)
                     .foregroundColor(.white)
             }
-            .opacity(showText ? 1.0 : 0.0)
-            // Apply the Metal view as a mask when dissolve starts
-            .mask {
-                 if startDissolve {
-                     MetalViewRepresentable(time: $animationTime)
-                         .edgesIgnoringSafeArea(.all)
-                 }
-                 // else - if no mask is applied, the text is fully visible (default behavior)
-             }
-
-            /* // Old BlendMode approach - REMOVED
-            // Metal View - now renders the MASK and sits ON TOP
-            if startDissolve {
-                MetalViewRepresentable(time: $animationTime)
-                    .edgesIgnoringSafeArea(.all)
-                    // Use the mask's luminance to control the destination (text) alpha
-                    .blendMode(.destinationIn) // <<< ERROR HERE
-                    .transition(.opacity) // Optional fade for the mask view itself if needed
-            }
-            */
+            // Animate opacity based on state
+            .opacity(showText ? (fadeOutText ? 0.0 : 1.0) : 0.0)
+            // Optional: add a slight scale effect on fade out
+            // .scaleEffect(fadeOutText ? 0.95 : 1.0)
 
         }
-        // .background(Color.black) // Background moved to ZStack
         .onAppear {
             // Sequence the animation
-            // 1. Fade in text (instantly, or with short fade)
+            // 1. Fade in text
             withAnimation(.easeIn(duration: textFadeInDuration)) {
                 showText = true
             }
 
-            // 2. Wait, then start dissolve
-            DispatchQueue.main.asyncAfter(deadline: .now() + textFadeInDuration + textDisplayDuration) {
-                withAnimation(.easeIn(duration: 0.1)) { // Quickly enable metal view
-                     startDissolve = true
-                }
-                // Start animating the time uniform for the shader
-                 withAnimation(.linear(duration: dissolveDuration)) {
-                    animationTime = 1.0
+            // 2. Wait, then start fade out
+            let fadeOutStartTime = textFadeInDuration + textDisplayDuration
+            DispatchQueue.main.asyncAfter(deadline: .now() + fadeOutStartTime) {
+                 withAnimation(.easeOut(duration: textFadeOutDuration)) {
+                    fadeOutText = true
                  }
             }
 
-            // 3. Wait for dissolve to finish, then call onFinished
-            let totalDuration = textFadeInDuration + textDisplayDuration + dissolveDuration + totalDurationBeforeFinish
+            // 3. Wait for fade out to finish, then call onFinished
+            let totalDuration = fadeOutStartTime + textFadeOutDuration + totalDurationBeforeFinish
             DispatchQueue.main.asyncAfter(deadline: .now() + totalDuration) {
                  onFinished()
             }
