@@ -252,7 +252,9 @@ class ChatViewModel: ObservableObject {
         while shouldContinueLoop && !Task.isCancelled {
             shouldContinueLoop = false
             let botResponsePlaceholderId = UUID()
-            messages.append(Message(text: "", isUser: false))
+            await MainActor.run { // Ensure placeholder is added on main thread before await
+                 messages.append(Message(text: "", isUser: false))
+            }
 
             // Add logging for history before API call
             print("--- History Before API Call (Turn Start) ---")
@@ -291,7 +293,8 @@ class ChatViewModel: ObservableObject {
 
             var accumulatedResponse = ""
             var finalFinishReason: String? = nil
-            var detectedRawToolCallTag = false // Flag to suppress UI update for raw tool tags
+            var detectedRawToolCallTag = false
+            var triggerUIUpdate = false
 
             do {
                  print("--- Starting API Call (Turn) ---")
@@ -318,20 +321,26 @@ class ChatViewModel: ObservableObject {
                             if let choice = chunk.choices?.first {
                                 if let reason = choice.finish_reason { finalFinishReason = reason }
                                 
-                                // Accumulate content
                                 if let contentDelta = choice.delta.content {
                                     accumulatedResponse += contentDelta
-                                    // Check for tool call tag start
-                                    if contentDelta.contains("<tool_call>") {
-                                        detectedRawToolCallTag = true
-                                        print(">>> Detected <tool_call> tag in stream <<<")
-                                    }
-                                    // Only update UI if the tag hasn't been seen in this turn
+                                    triggerUIUpdate = false
+
                                     if !detectedRawToolCallTag {
+                                        if contentDelta.contains("<tool_call>") {
+                                            detectedRawToolCallTag = true
+                                            print(">>> Detected <tool_call> tag in stream, updating UI <<<")
+                                            updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]")
+                                        } else {
+                                            if contentDelta.containsWhitespace { 
+                                                triggerUIUpdate = true
+                                            }
+                                        }
+                                    }
+                                    
+                                    if triggerUIUpdate && !detectedRawToolCallTag {
                                         updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
                                     }
                                 }
-                                // We IGNORE delta.tool_calls here because the model sends tags in content
                             }
                         } catch { print("SSE Decode Error: \(error) for data: \(String(data: data, encoding: .utf8) ?? "invalid utf8")") }
                     }
@@ -366,63 +375,95 @@ class ChatViewModel: ObservableObject {
             }
             print("Parsed and assembled \(assembledToolCalls.count) tool calls from final accumulated text.")
 
-            // --- Process Results based on PARSED calls --- 
-            if !assembledToolCalls.isEmpty {
-                print("Proceeding with tool call execution (\(assembledToolCalls.count) calls).")
-                shouldContinueLoop = true // Loop back after execution
-                // Update UI definitively to show processing state
-                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]" )
+            // --- Process Results based on PARSED calls ---
+            // Use MainActor.run for final UI updates to ensure correct thread and avoid async issues
+            await MainActor.run {
+                if !assembledToolCalls.isEmpty {
+                    print("Proceeding with tool call execution (\(assembledToolCalls.count) calls).")
+                    shouldContinueLoop = true
+                    // Update UI definitively to show processing state - DIRECTLY
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        messages[index].text = "[Processing Tools...]"
+                    } else {
+                        print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to update status for tool call.")
+                        // Fallback: Append status if placeholder missing?
+                        // messages.append(Message(text: "[Processing Tools...]", isUser: false))
+                    }
 
-                // Add Assistant message REQUESTING tools to history
-                 let toolCallDictsForHistory: [[String: Any]] = assembledToolCalls.map { tc in
-                     ["id": tc.id, "type": "function", "function": ["name": tc.functionName, "arguments": tc.arguments]]
-                 }
-                // IMPORTANT: Add tool_calls structure, content should be nil or NSNull
-                messageHistory.append(["role": "assistant", "tool_calls": toolCallDictsForHistory, "content": NSNull()]) 
+                    // Add Assistant message REQUESTING tools to history
+                    let toolCallDictsForHistory: [[String: Any]] = assembledToolCalls.map { tc in
+                        ["id": tc.id, "type": "function", "function": ["name": tc.functionName, "arguments": tc.arguments]]
+                    }
+                    messageHistory.append(["role": "assistant", "tool_calls": toolCallDictsForHistory, "content": NSNull()])
 
-                // Execute tools and add results
-                var toolResultsForHistory: [[String: Any]] = [] 
-                for toolCall in assembledToolCalls {
-                    let result = await executeToolCall(toolCall)
-                    toolResultsForHistory.append(["role": "tool", "tool_call_id": toolCall.id, "content": result.content])
+                    // Execute tools and add results (execution needs to be outside MainActor.run)
+                    // We will execute tools *after* this UI update block
+
+                } else {
+                    // No tool calls PARSED
+                    shouldContinueLoop = false
+                    print("No tool calls parsed. Handling final response.")
+                    let finalContent = accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    // Update UI definitively with the final text OR remove placeholder - DIRECTLY
+                    if !finalContent.isEmpty {
+                        if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                            messages[index].text = finalContent
+                            // Add final assistant text message to history (only if content exists)
+                            messageHistory.append(["role": "assistant", "content": finalContent])
+                            print("Final assistant text message added to history.")
+                        } else {
+                            print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to update final text. Appending new.")
+                            // Fallback: Append if placeholder missing
+                            messages.append(Message(text: finalContent, isUser: false))
+                            messageHistory.append(["role": "assistant", "content": finalContent])
+                            print("Final assistant text message added to history via fallback append.")
+                        }
+
+                    } else {
+                        // Final content is empty, remove placeholder
+                        if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                            messages.remove(at: index)
+                            print("Removed empty placeholder message as final response was empty.")
+                        } else {
+                            print("Final content empty, placeholder \(botResponsePlaceholderId) not found.")
+                        }
+                    }
                 }
-                messageHistory.append(contentsOf: toolResultsForHistory)
-                print("Tool results added. Looping back.")
+            } // End MainActor.run for final UI/history update
 
-            } else { 
-                // No tool calls PARSED from the accumulated text
-                shouldContinueLoop = false
-                print("No tool calls parsed. Handling final response.")
-                let finalContent = accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines) // Trim final response
-                
-                if !finalContent.isEmpty {
-                     // Update UI definitively with the final text
-                     updateBotMessage(id: botResponsePlaceholderId, text: finalContent)
-                     messageHistory.append(["role": "assistant", "content": finalContent])
-                     print("Final assistant text message added to history.")
-                 } else if messages.last?.id == botResponsePlaceholderId {
-                     // If response is empty AND no tools called, remove the placeholder
-                     messages.removeLast()
-                     print("Removed empty placeholder message as final response was empty and no tools were called.")
-                 } else {
-                    // If final content is empty but placeholder was already updated (e.g. with error), do nothing extra
-                    print("Final content empty, placeholder might have been handled already.")
+            // --- Execute Tools (if needed, outside MainActor block) ---
+             if shouldContinueLoop && !assembledToolCalls.isEmpty { // Check flag again
+                 var toolResultsForHistory: [[String: Any]] = []
+                 for toolCall in assembledToolCalls {
+                     let result = await executeToolCall(toolCall)
+                     toolResultsForHistory.append(["role": "tool", "tool_call_id": toolCall.id, "content": result.content])
                  }
-            }
-            
+                 // Append tool results to history (must be done after potential UI updates)
+                 await MainActor.run { // Modify history on main thread
+                    messageHistory.append(contentsOf: toolResultsForHistory)
+                 }
+                 print("Tool results added. Looping back.")
+             } else {
+                 // Ensure loop stops if no tool calls were processed
+                 shouldContinueLoop = false
+             }
+
         } // End while loop
         print("--- Interaction Loop Finished ---")
-        isSending = false 
+        await MainActor.run { isSending = false } // Ensure state change is on main thread
     }
 
-    // Update helper - remove extra id argument
+    // Update helper - Still used for intermediate stream updates
     private func updateBotMessage(id: UUID, text: String) {
-        if let index = messages.firstIndex(where: { $0.id == id }) {
-            messages[index].text = text
-        } else {
-            print("Warning: updateBotMessage couldn't find message with ID \(id). Appending new.")
-            // Corrected: Remove id argument from Message init
-            messages.append(Message(text: text, isUser: false))
+        // Run UI updates on the main thread
+        DispatchQueue.main.async {
+            if let index = self.messages.firstIndex(where: { $0.id == id }) {
+                self.messages[index].text = text
+            } else {
+                // Only print warning, do not append new message during stream updates
+                print("Warning: updateBotMessage couldn't find message with ID \(id). Text: '\(text)'. Doing nothing.")
+            }
         }
     }
 
