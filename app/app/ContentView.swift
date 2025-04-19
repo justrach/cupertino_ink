@@ -174,6 +174,13 @@ let getDeliveryDateToolDict: [String: AnyEncodable] = [
 
 let availableToolsDict: [[String: AnyEncodable]]? = [findOrderToolDict, getDeliveryDateToolDict]
 
+// Helper extension for checking whitespace
+extension String {
+    var containsWhitespace: Bool {
+        return self.rangeOfCharacter(from: .whitespacesAndNewlines) != nil
+    }
+}
+
 // --- Chat View Model ---
 @MainActor
 class ChatViewModel: ObservableObject {
@@ -267,7 +274,7 @@ class ChatViewModel: ObservableObject {
             var finishReason: String? = nil
 
             do {
-                 print("--- Starting API Call --- Body: \(String(data:request.httpBody ?? Data(), encoding: .utf8) ?? "nil")")
+                 print("--- Starting API Call ---")
                  let (bytes, response) = try await URLSession.shared.bytes(for: request)
                 
                  guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
@@ -282,32 +289,29 @@ class ChatViewModel: ObservableObject {
                 // Process the stream line by line
                 for try await line in bytes.lines {
                     guard !Task.isCancelled else { throw CancellationError() }
-                    // print("SSE Raw Line: \(line)") // Debug
                     if line.hasPrefix("data:") {
-                        let dataString = String(line.dropFirst(5).trimmingCharacters(in: .whitespaces)) // Allow for "data: "
-                        if dataString == "[DONE]" {
-                            // print("SSE Stream Done signal received.")
-                            break // End of stream
-                        }
-                        guard !dataString.isEmpty, let data = dataString.data(using: .utf8) else {
-                             print("Warning: Received empty or invalid data line: \(line)")
-                             continue
-                        }
+                        guard let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces).data(using: .utf8), !data.isEmpty else { continue } 
                         
                         // Decode the JSON chunk
                         do {
                             let chunk = try jsonDecoder.decode(SSEChunk.self, from: data)
-                            // print("SSE Decoded Chunk: \(chunk)") // Debug
-                            
                             if let choice = chunk.choices?.first {
-                                finishReason = choice.finish_reason ?? finishReason // Update finish reason if present
+                                let chunkFinishReason = choice.finish_reason // Get reason for *this* chunk
+                                finishReason = chunkFinishReason ?? finishReason // Update overall reason
                                 
                                 // Accumulate content
-                                if let content = choice.delta.content {
-                                    accumulatedResponse += content
-                                    updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
+                                var shouldUpdateUI = false
+                                if let contentDelta = choice.delta.content {
+                                    accumulatedResponse += contentDelta
+                                    // Update UI if delta contained whitespace OR if this chunk is the end
+                                    if contentDelta.containsWhitespace || chunkFinishReason != nil { 
+                                        shouldUpdateUI = true
+                                    }
                                 }
-                                
+                                // Immediately update UI if needed for responsiveness
+                                if shouldUpdateUI {
+                                     updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
+                                }
                                 // Accumulate tool calls (Handle fragments)
                                 if let toolCallChunks = choice.delta.tool_calls {
                                      for toolCallChunk in toolCallChunks {
@@ -334,10 +338,7 @@ class ChatViewModel: ObservableObject {
                                      }
                                 }
                             }
-                        } catch { 
-                            print("SSE JSON Decode Error: \(error) for line: \(line)")
-                            // Decide whether to continue or throw
-                        }
+                        } catch { print("SSE JSON Decode Error: \(error) for line: \(line)") }
                     }
                 }
                 print("Stream processing finished. Final Reason: \(finishReason ?? "N/A")")
@@ -369,7 +370,8 @@ class ChatViewModel: ObservableObject {
             // --- Process Assembled Tool Calls or Finalize Text ---
             if !assembledToolCalls.isEmpty {
                 shouldContinueLoop = true
-                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]" ) // Update UI
+                // Update UI message explicitly for tool processing start
+                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]")
 
                 // Add Assistant message (raw response) to history
                 // We store the raw response that contained the tool call requests
@@ -387,13 +389,17 @@ class ChatViewModel: ObservableObject {
                 messageHistory.append(contentsOf: toolResultsForHistory)
                 print("Tool results added. Looping back.")
 
-            } else if !accumulatedResponse.isEmpty {
-                // No tool calls, add final assistant message
-                messageHistory.append(["role": "assistant", "content": accumulatedResponse])
-                shouldContinueLoop = false
-            } else { 
-                // No tool calls, no content
-                if messages.last?.id == botResponsePlaceholderId { messages.removeLast() } // Remove placeholder
+            } else {
+                // No tool calls, handle final text display
+                let finalContent = accumulatedResponse.isEmpty ? nil : accumulatedResponse
+                if let content = finalContent {
+                    messageHistory.append(["role": "assistant", "content": content])
+                    // Ensure final text state is reflected in UI
+                    updateBotMessage(id: botResponsePlaceholderId, text: content)
+                } else {
+                    // No content received, remove placeholder
+                    if messages.last?.id == botResponsePlaceholderId { messages.removeLast() }
+                }
                 shouldContinueLoop = false
             }
             
