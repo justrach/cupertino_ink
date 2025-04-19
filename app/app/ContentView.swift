@@ -6,12 +6,16 @@
 //
 
 import SwiftUI
+import Combine // Still needed for ObservableObject
+// Removed: import OpenAI
+import Foundation // Needed for URLSession, JSONEncoder/Decoder etc.
 
 // Define a structure for chat messages
 struct Message: Identifiable, Equatable {
     let id = UUID()
-    let text: String
+    var text: String // Use var to allow incremental updates
     let isUser: Bool // To differentiate user messages (could be used for styling)
+    // let isInternal: Bool = false // Optional: for messages not shown directly (like tool results)
 }
 
 // Define a structure for mock chat history
@@ -33,6 +37,446 @@ let mockChatHistory: [ChatHistoryItem] = [
     ChatHistoryItem(title: "Futuristic Cartoon Request"),
     ChatHistoryItem(title: "iOS Simulator Runtime issue")
 ]
+
+// --- API Request/Response Structs (Encodable) ---
+
+// Matches the structure needed for the API request body
+struct ChatCompletionRequestBody: Encodable {
+    let model: String
+    let messages: [[String: String]] // Simple message format
+    let tools: [[String: AnyEncodable]]? // Use AnyEncodable for tool parameters
+    let tool_choice: String? // e.g., "auto"
+    let stream: Bool
+    // Add other parameters like temperature if needed
+}
+
+// Helper to encode complex dictionary values like tool parameters
+struct AnyEncodable: Encodable {
+    private let value: Any
+
+    init(_ value: Any) {
+        self.value = value
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch value {
+        case let encodable as Encodable:
+            // Check if the value itself is Encodable and encode it directly.
+            // This requires careful handling to avoid infinite recursion if AnyEncodable wraps itself.
+            // A more robust solution might involve type checking against known Encodable types.
+            try encodable.encode(to: encoder)
+        case is NSNull:
+            try container.encodeNil()
+        case let bool as Bool:
+            try container.encode(bool)
+        case let int as Int:
+            try container.encode(int)
+        case let double as Double:
+            try container.encode(double)
+        case let string as String:
+            try container.encode(string)
+        case let array as [Any]:
+             try container.encode(array.map { AnyEncodable($0) })
+        case let dictionary as [String: Any]:
+             try container.encode(dictionary.mapValues { AnyEncodable($0) })
+        default:
+            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: container.codingPath, debugDescription: "Value not encodable"))
+        }
+    }
+}
+
+// Represents the overall structure of an SSE data chunk
+struct SSEChunk: Decodable {
+    let id: String? // Optional ID
+    let choices: [SSEChoice]?
+}
+
+// Represents a choice within an SSE chunk
+struct SSEChoice: Decodable {
+    let delta: SSEDelta
+    let finish_reason: String? // e.g., "stop", "tool_calls"
+}
+
+// Represents the delta content within a choice
+struct SSEDelta: Decodable {
+    let role: String? // e.g., "assistant"
+    let content: String?
+    let tool_calls: [ToolCallChunk]?
+}
+
+// Represents a tool call chunk (might be partial)
+struct ToolCallChunk: Decodable {
+    let index: Int
+    let id: String? // ID might come in the first chunk
+    let type: String? // e.g., "function"
+    let function: FunctionCallChunk? // Function details
+}
+
+// Represents the function call part (might be partial)
+struct FunctionCallChunk: Decodable {
+    let name: String? // Name might come first
+    let arguments: String? // Arguments might come in subsequent chunks
+}
+
+// Represents a fully assembled tool call after processing the stream
+struct AssembledToolCall: Identifiable {
+    let index: Int
+    let id: String
+    let functionName: String
+    let arguments: String // Accumulated arguments JSON string
+}
+
+// Helper Structs for JSON Decoding
+struct ToolCallArgsFindOrder: Decodable {
+    let customer_name: String
+}
+
+struct ToolCallArgsGetDelivery: Decodable {
+    let order_id: String
+}
+
+// --- API Configuration ---
+let baseURL = "http://127.0.0.1:10240/v1/chat/completions"
+let modelName = "mlx-community/Qwen2.5-7B-Instruct-1M-4bit" // Your model
+
+// --- Tool Definitions (Simple Dictionaries) ---
+// Matches the API structure: https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools
+let findOrderToolDict: [String: AnyEncodable] = [
+    "type": AnyEncodable("function"),
+    "function": AnyEncodable([
+        "name": AnyEncodable("find_order_by_name"),
+        "description": AnyEncodable("Finds a customer's order ID based on their name..."),
+        "parameters": AnyEncodable([
+            "type": AnyEncodable("object"),
+            "properties": AnyEncodable([
+                "customer_name": AnyEncodable(["type": AnyEncodable("string"), "description": AnyEncodable("The full name...")])
+            ]),
+            "required": AnyEncodable(["customer_name"])
+        ])
+    ])
+]
+
+let getDeliveryDateToolDict: [String: AnyEncodable] = [
+    "type": AnyEncodable("function"),
+    "function": AnyEncodable([
+        "name": AnyEncodable("get_delivery_date"),
+        "description": AnyEncodable("Get the estimated delivery date..."),
+        "parameters": AnyEncodable([
+            "type": AnyEncodable("object"),
+            "properties": AnyEncodable([
+                "order_id": AnyEncodable(["type": AnyEncodable("string"), "description": AnyEncodable("The customer's unique order identifier.")])
+            ]),
+            "required": AnyEncodable(["order_id"])
+        ])
+    ])
+]
+
+let availableToolsDict: [[String: AnyEncodable]]? = [findOrderToolDict, getDeliveryDateToolDict]
+
+// --- Chat View Model ---
+@MainActor
+class ChatViewModel: ObservableObject {
+    @Published var messages: [Message] = [
+        // Initial message or load from history
+        Message(text: "Hello! How can I help you today?", isUser: false)
+    ]
+    @Published var newMessageText: String = ""
+    @Published var isSending: Bool = false // To disable input while processing
+
+    private var currentTask: Task<Void, Never>? = nil
+    let systemPrompt = """
+    You are a helpful customer support assistant focused on order delivery dates.
+    Follow these steps precisely:
+    1. Greet the user. If they ask about their order/delivery without providing details, ask for their *full name*. Do not ask for the order ID.
+    2. When the user provides a name, use the `find_order_by_name` tool. Do not guess or assume the name is correct.
+    3. If `find_order_by_name` returns an `order_id`, immediately use the `get_delivery_date` tool with that specific ID.
+    4. If `find_order_by_name` returns no `order_id` (null or missing), inform the user politely that the order could not be found and ask them to verify the name or provide an order ID if they have one.
+    5. Relay the estimated delivery date from `get_delivery_date` clearly to the user.
+    6. If any tool call results in an error, inform the user about the issue based on the error message.
+    Focus only on fulfilling the request using the tools. Be concise. Respond naturally.
+    """
+
+    // Use simple dictionary for history
+    private var messageHistory: [[String: String]] = []
+
+    init() {
+        messageHistory.append(["role": "system", "content": systemPrompt])
+    }
+
+    func sendMessage() {
+        guard !newMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isSending else { return }
+        let userMessageText = newMessageText
+        newMessageText = ""
+        isSending = true
+        let userMessage = Message(text: userMessageText, isUser: true)
+        messages.append(userMessage)
+        
+        // Add to simple dictionary history
+        messageHistory.append(["role": "user", "content": userMessageText])
+
+        currentTask?.cancel()
+        currentTask = Task {
+            await processChatInteraction()
+            if !Task.isCancelled { isSending = false }
+        }
+    }
+    
+    private func processChatInteraction() async {
+        var shouldContinueLoop = true
+        let jsonEncoder = JSONEncoder()
+        let jsonDecoder = JSONDecoder()
+
+        while shouldContinueLoop && !Task.isCancelled {
+            shouldContinueLoop = false
+            let botResponsePlaceholderId = UUID()
+            messages.append(Message(text: "", isUser: false))
+
+            // Prepare Request Body
+            let requestBody = ChatCompletionRequestBody(
+                model: modelName,
+                messages: messageHistory,
+                tools: availableToolsDict,
+                tool_choice: "auto",
+                stream: true
+            )
+
+            guard let url = URL(string: baseURL) else { 
+                updateBotMessage(id: botResponsePlaceholderId, text: "Error: Invalid API URL")
+                return
+            }
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+            // Add API key header if needed: request.setValue("Bearer YOUR_API_KEY", forHTTPHeaderField: "Authorization")
+            
+            do {
+                request.httpBody = try jsonEncoder.encode(requestBody)
+            } catch {
+                updateBotMessage(id: botResponsePlaceholderId, text: "Error: Failed to encode request: \(error.localizedDescription)")
+                isSending = false
+                return
+            }
+
+            // --- SSE Stream Handling --- 
+            var accumulatedResponse = ""
+            var currentToolCalls: [Int: ToolCallChunk] = [:] // index -> chunk
+            var accumulatedArguments: [Int: String] = [:] // index -> arguments string
+            var assembledToolCalls: [AssembledToolCall] = []
+            var finishReason: String? = nil
+
+            do {
+                 print("--- Starting API Call --- Body: \(String(data:request.httpBody ?? Data(), encoding: .utf8) ?? "nil")")
+                 let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                
+                 guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+                     let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+                     // Attempt to read error body
+                     var errorBody = ""
+                     // This part is tricky with streams, might not get full body easily
+                     // try await bytes.lines.reduce(into: "") { $0 += $1 }
+                     throw NSError(domain: "HTTPError", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP Error: \(statusCode). Body: \(errorBody)"]) // Simple error
+                 }
+
+                // Process the stream line by line
+                for try await line in bytes.lines {
+                    guard !Task.isCancelled else { throw CancellationError() }
+                    // print("SSE Raw Line: \(line)") // Debug
+                    if line.hasPrefix("data:") {
+                        let dataString = String(line.dropFirst(5).trimmingCharacters(in: .whitespaces)) // Allow for "data: "
+                        if dataString == "[DONE]" {
+                            // print("SSE Stream Done signal received.")
+                            break // End of stream
+                        }
+                        guard !dataString.isEmpty, let data = dataString.data(using: .utf8) else {
+                             print("Warning: Received empty or invalid data line: \(line)")
+                             continue
+                        }
+                        
+                        // Decode the JSON chunk
+                        do {
+                            let chunk = try jsonDecoder.decode(SSEChunk.self, from: data)
+                            // print("SSE Decoded Chunk: \(chunk)") // Debug
+                            
+                            if let choice = chunk.choices?.first {
+                                finishReason = choice.finish_reason ?? finishReason // Update finish reason if present
+                                
+                                // Accumulate content
+                                if let content = choice.delta.content {
+                                    accumulatedResponse += content
+                                    updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
+                                }
+                                
+                                // Accumulate tool calls (Handle fragments)
+                                if let toolCallChunks = choice.delta.tool_calls {
+                                     for toolCallChunk in toolCallChunks {
+                                         let index = toolCallChunk.index
+                                         // Initialize if first time seeing this index
+                                         if currentToolCalls[index] == nil {
+                                             currentToolCalls[index] = toolCallChunk
+                                             accumulatedArguments[index] = "" // Init empty args string
+                                         }
+                                         // Accumulate argument fragments
+                                         if let argChunk = toolCallChunk.function?.arguments {
+                                             accumulatedArguments[index]? += argChunk
+                                         }
+                                         // Update ID if present (usually in first chunk for an index)
+                                         if let id = toolCallChunk.id {
+                                              currentToolCalls[index] = ToolCallChunk(index: index, id: id, type: currentToolCalls[index]?.type ?? toolCallChunk.type, function: currentToolCalls[index]?.function ?? toolCallChunk.function)
+                                         }
+                                          // Update Name if present (usually in first chunk for an index)
+                                         if let name = toolCallChunk.function?.name {
+                                              let existingFunc = currentToolCalls[index]?.function
+                                              let updatedFunc = FunctionCallChunk(name: name, arguments: existingFunc?.arguments) // Keep existing args if any
+                                              currentToolCalls[index] = ToolCallChunk(index: index, id: currentToolCalls[index]?.id ?? toolCallChunk.id, type: currentToolCalls[index]?.type ?? toolCallChunk.type, function: updatedFunc)
+                                         }
+                                     }
+                                }
+                            }
+                        } catch { 
+                            print("SSE JSON Decode Error: \(error) for line: \(line)")
+                            // Decide whether to continue or throw
+                        }
+                    }
+                }
+                print("Stream processing finished. Final Reason: \(finishReason ?? "N/A")")
+
+                // Assemble Tool Calls after stream completion
+                if finishReason == "tool_calls" {
+                    for index in currentToolCalls.keys.sorted() {
+                        guard let finalChunk = currentToolCalls[index],
+                              let id = finalChunk.id,
+                              let function = finalChunk.function,
+                              let name = function.name,
+                              let args = accumulatedArguments[index] else 
+                        { 
+                            print("Warning: Could not assemble tool call at index \(index): Missing data - Chunk: \(currentToolCalls[index] as Any), Args: \(accumulatedArguments[index] as Any)")
+                            continue
+                        }
+                        assembledToolCalls.append(AssembledToolCall(index: index, id: id, functionName: name, arguments: args))
+                    }
+                     print("Assembled \(assembledToolCalls.count) tool calls.")
+                }
+
+            } catch is CancellationError { // ... existing handling ...
+            } catch { // Handle URLSession errors, HTTP errors, etc.
+                 print("Network/Stream Error: \(error)")
+                 updateBotMessage(id: botResponsePlaceholderId, text: "Error: \(error.localizedDescription)")
+                 shouldContinueLoop = false
+            }
+
+            // --- Process Assembled Tool Calls or Finalize Text ---
+            if !assembledToolCalls.isEmpty {
+                shouldContinueLoop = true
+                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]" ) // Update UI
+
+                // Add Assistant message (raw response) to history
+                // We store the raw response that contained the tool call requests
+                messageHistory.append(["role": "assistant", "content": accumulatedResponse]) 
+                // Or store a structured representation if preferred:
+                // messageHistory.append(["role": "assistant", "tool_calls": assembledToolCalls.map { /* convert to dict */ } ])
+
+                // Execute tools and add results
+                var toolResultsForHistory: [[String: String]] = []
+                for toolCall in assembledToolCalls {
+                    let result = await executeToolCall(toolCall)
+                    // Add Tool message result to history
+                    toolResultsForHistory.append(["role": "tool", "tool_call_id": toolCall.id, "content": result.content])
+                }
+                messageHistory.append(contentsOf: toolResultsForHistory)
+                print("Tool results added. Looping back.")
+
+            } else if !accumulatedResponse.isEmpty {
+                // No tool calls, add final assistant message
+                messageHistory.append(["role": "assistant", "content": accumulatedResponse])
+                shouldContinueLoop = false
+            } else { 
+                // No tool calls, no content
+                if messages.last?.id == botResponsePlaceholderId { messages.removeLast() } // Remove placeholder
+                shouldContinueLoop = false
+            }
+            
+        } // End while loop
+        print("--- Interaction Loop Finished ---")
+        isSending = false // Ensure sending is disabled
+    }
+
+    // Helper to update or add a bot message
+    private func updateBotMessage(id: UUID, text: String) {
+        if let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index].text = text
+        } else {
+            // This case might happen if the placeholder wasn't added correctly
+            messages.append(Message(text: text, isUser: false))
+        }
+    }
+
+    // --- Tool Execution (accepts AssembledToolCall) ---
+    struct ToolResult { let content: String }
+
+    private func executeToolCall(_ toolCall: AssembledToolCall) async -> ToolResult {
+        let functionName = toolCall.functionName
+        let argumentsString = toolCall.arguments
+        var resultJsonString = "{\"error\": \"Tool execution failed\"}"
+        print("Executing Tool: \(functionName) args: \(argumentsString)")
+
+        guard let argsData = argumentsString.data(using: .utf8) else {
+            return ToolResult(content: "{\"error\": \"Invalid argument encoding\"}")
+        }
+        let decoder = JSONDecoder()
+        do {
+            var functionResponseDict: [String: Any?] = [:]
+            switch functionName {
+            case "find_order_by_name":
+                let decodedArgs = try decoder.decode(ToolCallArgsFindOrder.self, from: argsData)
+                functionResponseDict = self.findOrderByName(customerName: decodedArgs.customer_name)
+            case "get_delivery_date":
+                let decodedArgs = try decoder.decode(ToolCallArgsGetDelivery.self, from: argsData)
+                functionResponseDict = self.getDeliveryDate(orderId: decodedArgs.order_id)
+            default:
+                functionResponseDict = ["error": "Unknown function: \(functionName)"]
+            }
+            let resultData = try JSONSerialization.data(withJSONObject: functionResponseDict.mapValues { $0 ?? NSNull() }, options: [])
+            resultJsonString = String(data: resultData, encoding: .utf8) ?? "{\"error\": \"Failed to encode tool result\"}"
+        } catch {
+            resultJsonString = "{\"error\": \"Tool execution error: \(error.localizedDescription)\"}"
+        }
+        print("Execution Result: \(resultJsonString)")
+        return ToolResult(content: resultJsonString)
+    }
+
+    // Mock Tool Implementations
+    func findOrderByName(customerName: String) -> [String: Any?] {
+        print("--- Swift Tool Call: findOrderByName(customerName: '\(customerName)') ---")
+        let trimmedName = customerName.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedName.contains(" ") && trimmedName.count > 3 {
+            let simulatedId = "ORD-\(trimmedName.split(separator: " ").first?.prefix(3).uppercased() ?? "UNK")\(String(format: "%02d", trimmedName.count))"
+            print("  -> Found order ID: \(simulatedId)")
+            return ["order_id": simulatedId]
+        } else {
+            print("  -> No order found for name: '\(customerName)'")
+            return ["order_id": nil, "message": "Could not find order for '\(customerName)'. Verify name."]
+        }
+    }
+
+    func getDeliveryDate(orderId: String) -> [String: Any?] {
+        print("--- Swift Tool Call: getDeliveryDate(orderId: '\(orderId)') ---")
+        let trimmedId = orderId.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedId.starts(with: "ORD-") {
+            let estimatedDelivery = Calendar.current.date(byAdding: .day, value: 3, to: Date())!
+            let dateFormatter = DateFormatter()
+            dateFormatter.dateFormat = "yyyy-MM-dd"
+            dateFormatter.timeZone = TimeZone(secondsFromGMT: 0) // Use UTC for consistency
+            let dateString = dateFormatter.string(from: estimatedDelivery)
+            print("  -> Estimated Delivery: \(dateString)")
+            return ["order_id": orderId, "estimated_delivery_date": dateString]
+        } else {
+            print("  -> Invalid Order ID format: '\(orderId)'")
+            return ["error": "Invalid order_id format: '\(orderId)'."]
+        }
+    }
+}
 
 struct ContentView: View {
     // State for search text
@@ -103,17 +547,20 @@ struct ContentView: View {
 struct ChatView: View {
     // Removed binding for sidebar visibility
     @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
+    // Use the ViewModel
+    @StateObject private var viewModel: ChatViewModel
     
     // Optional: Receive history item to potentially load chat
     var historyItem: ChatHistoryItem? = nil
 
-    // State variables to hold messages and user input
-    @State private var messages: [Message] = [
-        // Example messages (can be removed or loaded based on historyItem)
-        Message(text: "Hello! How can I help you today?", isUser: false),
-        Message(text: "Hi! What can you do?", isUser: true)
-    ]
-    @State private var newMessageText: String = ""
+    // Initializer to handle ChatViewModel creation/injection
+    init(historyItem: ChatHistoryItem? = nil) {
+        self.historyItem = historyItem
+        // Create a new ViewModel instance for this view
+        // In a real app, you might pass this in or use @EnvironmentObject
+        _viewModel = StateObject(wrappedValue: ChatViewModel())
+        // TODO: Load initial messages based on historyItem if needed
+    }
 
     var body: some View {
         VStack(spacing: 0) { // Remove spacing between ScrollView and Input area
@@ -121,7 +568,8 @@ struct ChatView: View {
             ScrollViewReader { proxy in // Add ScrollViewReader
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) { // Use LazyVStack for performance
-                        ForEach(messages) { message in
+                        // Use viewModel.messages
+                        ForEach(viewModel.messages) { message in
                             MessageView(message: message)
                                 .id(message.id) // Add ID for scrolling
                         }
@@ -131,36 +579,41 @@ struct ChatView: View {
                 }
                 // Set background based on color scheme
                 .background(colorScheme == .dark ? Color.black : Color(NSColor.windowBackgroundColor))
-                .onChange(of: messages) { oldValue, newValue in // Observe the whole array for changes
+                // Use viewModel.messages
+                .onChange(of: viewModel.messages) { oldValue, newValue in // Observe the whole array for changes
                     // Ensure scrolling happens only when count increases and the last message is new
-                    if newValue.count > oldValue.count, let lastMessage = newValue.last { 
+                    if newValue.count > oldValue.count, let lastMessage = newValue.last {
                         scrollToBottom(proxy: proxy, messageId: lastMessage.id)
                     }
                 }
                 .onAppear { // Scroll to bottom on initial appear
-                   scrollToBottom(proxy: proxy, messageId: messages.last?.id)
+                   // Use viewModel.messages
+                   scrollToBottom(proxy: proxy, messageId: viewModel.messages.last?.id)
                 }
             }
 
             // Input area
             HStack(spacing: 10) { // Container for TextField and Button
-                TextField("Ask anything...", text: $newMessageText, axis: .vertical)
+                // Use viewModel.newMessageText
+                TextField("Ask anything...", text: $viewModel.newMessageText, axis: .vertical)
                     .textFieldStyle(.plain)
                     .frame(minHeight: 30)
                     // Remove specific TextField styling (background, clip, overlay)
                     .foregroundColor(colorScheme == .dark ? .nuevoLightGray : .primary)
-                    .onSubmit { // Call sendMessage when Enter is pressed
-                        sendMessage()
+                    .onSubmit { // Call ViewModel's sendMessage
+                        viewModel.sendMessage()
                     }
+                    .disabled(viewModel.isSending) // Disable while sending
 
-                Button(action: sendMessage) {
+                Button(action: viewModel.sendMessage) { // Call ViewModel's sendMessage
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 24))
                         // Use nuevoOrange when enabled, slightly dimmer/grayer when disabled
-                        .foregroundColor(newMessageText.isEmpty ? .gray.opacity(0.6) : .nuevoOrange)
+                        .foregroundColor(viewModel.newMessageText.isEmpty || viewModel.isSending ? .gray.opacity(0.6) : .nuevoOrange)
                 }
                 .buttonStyle(.plain)
-                .disabled(newMessageText.isEmpty)
+                 // Use viewModel properties for disabled state
+                .disabled(viewModel.newMessageText.isEmpty || viewModel.isSending)
                 .frame(minHeight: 30) // Align height with TextField
             }
             // Apply styling to the HStack to create the 'island'
@@ -184,42 +637,12 @@ struct ChatView: View {
         .navigationTitle(historyItem?.title ?? "cupertino.ink")
     }
 
-    // Function to handle sending a message
-    func sendMessage() {
-        guard !newMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        let userMessage = Message(text: newMessageText, isUser: true)
-        newMessageText = "" // Clear text field immediately
-
-        withAnimation(.easeOut(duration: 0.15)) {
-            messages.append(userMessage)
-        }
-
-        // Placeholder bot response
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            let thinkingMessage = Message(text: "Thinking...", isUser: false)
-            withAnimation(.easeOut(duration: 0.15)) {
-                 messages.append(thinkingMessage)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                 let responseText = "This is a placeholder response to your query about: \"\(userMessage.text)\""
-                 let responseMessage = Message(text: responseText, isUser: false)
-                 if let index = messages.firstIndex(where: { $0.id == thinkingMessage.id }) {
-                      withAnimation(.easeOut(duration: 0.2)) {
-                          messages[index] = responseMessage
-                      }
-                 } else {
-                     withAnimation(.easeOut(duration: 0.15)) {
-                         messages.append(responseMessage)
-                     }
-                 }
-            }
-        }
-    }
-
     // Helper function to scroll to the bottom
     private func scrollToBottom(proxy: ScrollViewProxy, messageId: UUID?) {
         guard let id = messageId else { return }
-        proxy.scrollTo(id, anchor: .bottom)
+        withAnimation(.easeOut(duration: 0.25)) { // Add animation
+             proxy.scrollTo(id, anchor: .bottom)
+        }
     }
 }
 
