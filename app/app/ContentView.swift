@@ -75,6 +75,13 @@ struct ContentView: View {
                 // No longer need to pass binding
                 ChatView()
             }
+            .toolbar { // Add toolbar for the toggle button
+                ToolbarItem(placement: .navigation) { // Place it near the leading edge/title
+                    Button(action: toggleSidebar) {
+                        Label("Toggle Sidebar", systemImage: "sidebar.left")
+                    }
+                }
+            }
             .frame(minWidth: 600, minHeight: 400)
             // Apply fade-in effect to the NavigationView - RESTORED
             .opacity(contentVisible ? 1 : 0)
