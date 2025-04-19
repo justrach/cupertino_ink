@@ -76,7 +76,7 @@ struct ContentView: View {
                 ChatView()
             }
             .toolbar { // Add toolbar for the toggle button
-                ToolbarItem(placement: .navigation) { // Place it near the leading edge/title
+                ToolbarItem(placement: .navigation) { // Place it near the trailing edge/primary actions
                     Button(action: toggleSidebar) {
                         Label("Toggle Sidebar", systemImage: "sidebar.left")
                     }
