@@ -43,9 +43,9 @@ let mockChatHistory: [ChatHistoryItem] = [
 // Matches the structure needed for the API request body
 struct ChatCompletionRequestBody: Encodable {
     let model: String
-    let messages: [[String: String]] // Simple message format
-    let tools: [[String: AnyEncodable]]? // Use AnyEncodable for tool parameters
-    let tool_choice: String? // e.g., "auto"
+    let messages: [[String: AnyEncodable]]
+    let tools: [[String: AnyEncodable]]?
+    let tool_choice: String?
     let stream: Bool
     // Add other parameters like temperature if needed
 }
@@ -181,6 +181,22 @@ extension String {
     }
 }
 
+// Re-add necessary structs for parsing
+struct RawToolCall: Decodable {
+    let name: String
+    let arguments: [String: String]
+}
+
+struct ParsedToolCall {
+    let id: String = "call_\(UUID().uuidString.prefix(12))" // Generate ID during parsing
+    let type: String = "function"
+    let function: FunctionCall
+    struct FunctionCall {
+        let name: String
+        let arguments: [String: String]
+    }
+}
+
 // --- Chat View Model ---
 @MainActor
 class ChatViewModel: ObservableObject {
@@ -204,8 +220,8 @@ class ChatViewModel: ObservableObject {
     Focus only on fulfilling the request using the tools. Be concise. Respond naturally.
     """
 
-    // Use simple dictionary for history
-    private var messageHistory: [[String: String]] = []
+    // Corrected History Type: Use [String: Any] to allow complex values like tool_calls
+    private var messageHistory: [[String: Any]] = []
 
     init() {
         messageHistory.append(["role": "system", "content": systemPrompt])
@@ -218,8 +234,7 @@ class ChatViewModel: ObservableObject {
         isSending = true
         let userMessage = Message(text: userMessageText, isUser: true)
         messages.append(userMessage)
-        
-        // Add to simple dictionary history
+        // Add user message - value is String, compatible with [String: Any]
         messageHistory.append(["role": "user", "content": userMessageText])
 
         currentTask?.cancel()
@@ -239,16 +254,25 @@ class ChatViewModel: ObservableObject {
             let botResponsePlaceholderId = UUID()
             messages.append(Message(text: "", isUser: false))
 
-            // Prepare Request Body
+            // Add logging for history before API call
+            print("--- History Before API Call (Turn Start) ---")
+            do {
+                 let historyData = try JSONSerialization.data(withJSONObject: messageHistory, options: .prettyPrinted)
+                 print(String(data: historyData, encoding: .utf8) ?? "Failed to print history")
+            } catch { print("Error printing history: \(error)") }
+            print("-------------------------------------------")
+
+            let messagesForRequest = messageHistory.map { dict -> [String: AnyEncodable] in
+                 dict.mapValues { AnyEncodable($0) }
+            }
             let requestBody = ChatCompletionRequestBody(
                 model: modelName,
-                messages: messageHistory,
+                messages: messagesForRequest,
                 tools: availableToolsDict,
                 tool_choice: "auto",
                 stream: true
             )
-
-            guard let url = URL(string: baseURL) else { 
+            guard let url = URL(string: baseURL) else {
                 updateBotMessage(id: botResponsePlaceholderId, text: "Error: Invalid API URL")
                 return
             }
@@ -256,7 +280,6 @@ class ChatViewModel: ObservableObject {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
-            // Add API key header if needed: request.setValue("Bearer YOUR_API_KEY", forHTTPHeaderField: "Authorization")
             
             do {
                 request.httpBody = try jsonEncoder.encode(requestBody)
@@ -266,15 +289,12 @@ class ChatViewModel: ObservableObject {
                 return
             }
 
-            // --- SSE Stream Handling --- 
             var accumulatedResponse = ""
-            var currentToolCalls: [Int: ToolCallChunk] = [:] // index -> chunk
-            var accumulatedArguments: [Int: String] = [:] // index -> arguments string
-            var assembledToolCalls: [AssembledToolCall] = []
-            var finishReason: String? = nil
+            var finalFinishReason: String? = nil
+            var detectedRawToolCallTag = false // Flag to suppress UI update for raw tool tags
 
             do {
-                 print("--- Starting API Call ---")
+                 print("--- Starting API Call (Turn) ---")
                  let (bytes, response) = try await URLSession.shared.bytes(for: request)
                 
                  guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
@@ -291,131 +311,148 @@ class ChatViewModel: ObservableObject {
                     guard !Task.isCancelled else { throw CancellationError() }
                     if line.hasPrefix("data:") {
                         guard let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces).data(using: .utf8), !data.isEmpty else { continue } 
+                        if String(data: data, encoding: .utf8) == "[DONE]" { break } // Check for [DONE] signal
                         
-                        // Decode the JSON chunk
                         do {
                             let chunk = try jsonDecoder.decode(SSEChunk.self, from: data)
                             if let choice = chunk.choices?.first {
-                                let chunkFinishReason = choice.finish_reason // Get reason for *this* chunk
-                                finishReason = chunkFinishReason ?? finishReason // Update overall reason
+                                if let reason = choice.finish_reason { finalFinishReason = reason }
                                 
                                 // Accumulate content
-                                var shouldUpdateUI = false
                                 if let contentDelta = choice.delta.content {
                                     accumulatedResponse += contentDelta
-                                    // Update UI if delta contained whitespace OR if this chunk is the end
-                                    if contentDelta.containsWhitespace || chunkFinishReason != nil { 
-                                        shouldUpdateUI = true
+                                    // Check for tool call tag start
+                                    if contentDelta.contains("<tool_call>") {
+                                        detectedRawToolCallTag = true
+                                        print(">>> Detected <tool_call> tag in stream <<<")
+                                    }
+                                    // Only update UI if the tag hasn't been seen in this turn
+                                    if !detectedRawToolCallTag {
+                                        updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
                                     }
                                 }
-                                // Immediately update UI if needed for responsiveness
-                                if shouldUpdateUI {
-                                     updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
-                                }
-                                // Accumulate tool calls (Handle fragments)
-                                if let toolCallChunks = choice.delta.tool_calls {
-                                     for toolCallChunk in toolCallChunks {
-                                         let index = toolCallChunk.index
-                                         // Initialize if first time seeing this index
-                                         if currentToolCalls[index] == nil {
-                                             currentToolCalls[index] = toolCallChunk
-                                             accumulatedArguments[index] = "" // Init empty args string
-                                         }
-                                         // Accumulate argument fragments
-                                         if let argChunk = toolCallChunk.function?.arguments {
-                                             accumulatedArguments[index]? += argChunk
-                                         }
-                                         // Update ID if present (usually in first chunk for an index)
-                                         if let id = toolCallChunk.id {
-                                              currentToolCalls[index] = ToolCallChunk(index: index, id: id, type: currentToolCalls[index]?.type ?? toolCallChunk.type, function: currentToolCalls[index]?.function ?? toolCallChunk.function)
-                                         }
-                                          // Update Name if present (usually in first chunk for an index)
-                                         if let name = toolCallChunk.function?.name {
-                                              let existingFunc = currentToolCalls[index]?.function
-                                              let updatedFunc = FunctionCallChunk(name: name, arguments: existingFunc?.arguments) // Keep existing args if any
-                                              currentToolCalls[index] = ToolCallChunk(index: index, id: currentToolCalls[index]?.id ?? toolCallChunk.id, type: currentToolCalls[index]?.type ?? toolCallChunk.type, function: updatedFunc)
-                                         }
-                                     }
-                                }
+                                // We IGNORE delta.tool_calls here because the model sends tags in content
                             }
-                        } catch { print("SSE JSON Decode Error: \(error) for line: \(line)") }
+                        } catch { print("SSE Decode Error: \(error) for data: \(String(data: data, encoding: .utf8) ?? "invalid utf8")") }
                     }
                 }
-                print("Stream processing finished. Final Reason: \(finishReason ?? "N/A")")
+                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A"). Detected Tag: \(detectedRawToolCallTag). Accumulated Response: \(accumulatedResponse)")
 
-                // Assemble Tool Calls after stream completion
-                if finishReason == "tool_calls" {
-                    for index in currentToolCalls.keys.sorted() {
-                        guard let finalChunk = currentToolCalls[index],
-                              let id = finalChunk.id,
-                              let function = finalChunk.function,
-                              let name = function.name,
-                              let args = accumulatedArguments[index] else 
-                        { 
-                            print("Warning: Could not assemble tool call at index \(index): Missing data - Chunk: \(currentToolCalls[index] as Any), Args: \(accumulatedArguments[index] as Any)")
-                            continue
-                        }
-                        assembledToolCalls.append(AssembledToolCall(index: index, id: id, functionName: name, arguments: args))
-                    }
-                     print("Assembled \(assembledToolCalls.count) tool calls.")
-                }
-
-            } catch is CancellationError { // ... existing handling ...
+            } catch is CancellationError {
+                 print("Task Cancelled during stream.")
+                 shouldContinueLoop = false // Ensure loop terminates if cancelled
             } catch { // Handle URLSession errors, HTTP errors, etc.
                  print("Network/Stream Error: \(error)")
                  updateBotMessage(id: botResponsePlaceholderId, text: "Error: \(error.localizedDescription)")
                  shouldContinueLoop = false
             }
 
-            // --- Process Assembled Tool Calls or Finalize Text ---
-            if !assembledToolCalls.isEmpty {
-                shouldContinueLoop = true
-                // Update UI message explicitly for tool processing start
-                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]")
+            // --- PARSE final accumulated response for tool calls --- 
+            let parsedToolCalls = parseToolCalls(from: accumulatedResponse)
+            var assembledToolCalls: [AssembledToolCall] = []
+            for parsedCall in parsedToolCalls {
+                do {
+                    let argumentsData = try JSONEncoder().encode(parsedCall.function.arguments)
+                    guard let argumentsString = String(data: argumentsData, encoding: .utf8) else {
+                        print("Warning: Could not re-encode arguments dictionary to JSON string for \(parsedCall.function.name)")
+                        continue // Skip this call if encoding fails
+                    }
+                    assembledToolCalls.append(
+                        AssembledToolCall(index: 0, id: parsedCall.id, functionName: parsedCall.function.name, arguments: argumentsString)
+                    )
+                } catch {
+                    print("Warning: Failed to re-encode arguments dictionary: \(error) for \(parsedCall.function.name)")
+                }
+            }
+            print("Parsed and assembled \(assembledToolCalls.count) tool calls from final accumulated text.")
 
-                // Add Assistant message (raw response) to history
-                // We store the raw response that contained the tool call requests
-                messageHistory.append(["role": "assistant", "content": accumulatedResponse]) 
-                // Or store a structured representation if preferred:
-                // messageHistory.append(["role": "assistant", "tool_calls": assembledToolCalls.map { /* convert to dict */ } ])
+            // --- Process Results based on PARSED calls --- 
+            if !assembledToolCalls.isEmpty {
+                print("Proceeding with tool call execution (\(assembledToolCalls.count) calls).")
+                shouldContinueLoop = true // Loop back after execution
+                // Update UI definitively to show processing state
+                updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]" )
+
+                // Add Assistant message REQUESTING tools to history
+                 let toolCallDictsForHistory: [[String: Any]] = assembledToolCalls.map { tc in
+                     ["id": tc.id, "type": "function", "function": ["name": tc.functionName, "arguments": tc.arguments]]
+                 }
+                // IMPORTANT: Add tool_calls structure, content should be nil or NSNull
+                messageHistory.append(["role": "assistant", "tool_calls": toolCallDictsForHistory, "content": NSNull()]) 
 
                 // Execute tools and add results
-                var toolResultsForHistory: [[String: String]] = []
+                var toolResultsForHistory: [[String: Any]] = [] 
                 for toolCall in assembledToolCalls {
                     let result = await executeToolCall(toolCall)
-                    // Add Tool message result to history
                     toolResultsForHistory.append(["role": "tool", "tool_call_id": toolCall.id, "content": result.content])
                 }
                 messageHistory.append(contentsOf: toolResultsForHistory)
                 print("Tool results added. Looping back.")
 
-            } else {
-                // No tool calls, handle final text display
-                let finalContent = accumulatedResponse.isEmpty ? nil : accumulatedResponse
-                if let content = finalContent {
-                    messageHistory.append(["role": "assistant", "content": content])
-                    // Ensure final text state is reflected in UI
-                    updateBotMessage(id: botResponsePlaceholderId, text: content)
-                } else {
-                    // No content received, remove placeholder
-                    if messages.last?.id == botResponsePlaceholderId { messages.removeLast() }
-                }
+            } else { 
+                // No tool calls PARSED from the accumulated text
                 shouldContinueLoop = false
+                print("No tool calls parsed. Handling final response.")
+                let finalContent = accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines) // Trim final response
+                
+                if !finalContent.isEmpty {
+                     // Update UI definitively with the final text
+                     updateBotMessage(id: botResponsePlaceholderId, text: finalContent)
+                     messageHistory.append(["role": "assistant", "content": finalContent])
+                     print("Final assistant text message added to history.")
+                 } else if messages.last?.id == botResponsePlaceholderId {
+                     // If response is empty AND no tools called, remove the placeholder
+                     messages.removeLast()
+                     print("Removed empty placeholder message as final response was empty and no tools were called.")
+                 } else {
+                    // If final content is empty but placeholder was already updated (e.g. with error), do nothing extra
+                    print("Final content empty, placeholder might have been handled already.")
+                 }
             }
             
         } // End while loop
         print("--- Interaction Loop Finished ---")
-        isSending = false // Ensure sending is disabled
+        isSending = false 
     }
 
-    // Helper to update or add a bot message
+    // Update helper - remove extra id argument
     private func updateBotMessage(id: UUID, text: String) {
         if let index = messages.firstIndex(where: { $0.id == id }) {
             messages[index].text = text
         } else {
-            // This case might happen if the placeholder wasn't added correctly
+            print("Warning: updateBotMessage couldn't find message with ID \(id). Appending new.")
+            // Corrected: Remove id argument from Message init
             messages.append(Message(text: text, isUser: false))
         }
+    }
+
+    // --- Tool Call Parsing --- 
+    private func parseToolCalls(from text: String) -> [ParsedToolCall] {
+        var calls: [ParsedToolCall] = []
+        guard let regex = try? NSRegularExpression(pattern: "<tool_call>(.*?)</tool_call>", options: [.dotMatchesLineSeparators]) else {
+            print("Error: Invalid regex for tool call parsing.")
+            return []
+        }
+        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        regex.enumerateMatches(in: text, options: [], range: nsRange) { match, _, _ in
+            guard let match = match, match.numberOfRanges == 2 else { return }
+            let jsonRange = match.range(at: 1)
+            if let swiftRange = Range(jsonRange, in: text) {
+                let jsonString = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let jsonData = jsonString.data(using: .utf8) else { return }
+                do {
+                    let decoder = JSONDecoder()
+                    let rawCall = try decoder.decode(RawToolCall.self, from: jsonData)
+                    // Create ParsedToolCall with the dictionary
+                    calls.append(ParsedToolCall(function: .init(name: rawCall.name, arguments: rawCall.arguments)))
+                    print("Successfully decoded tool call: \(rawCall.name) with args: \(rawCall.arguments)")
+                } catch { 
+                    print("Error decoding tool call JSON: \(error) - JSON: \(jsonString)")
+                }
+            }
+        }
+        print("Parsed \(calls.count) calls from text within parseToolCalls func.")
+        return calls
     }
 
     // --- Tool Execution (accepts AssembledToolCall) ---
