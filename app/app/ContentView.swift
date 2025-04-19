@@ -40,11 +40,13 @@ struct ContentView: View {
     // State to manage chat history filtering (if implementing search)
     // @State private var filteredChatHistory = mockChatHistory
     @State private var contentVisible = false // State for fade-in - RESTORED
+    @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
 
     var body: some View {
         ZStack { // Wrap in ZStack for fade-in from black - RESTORED
-            // Background that starts as black - RESTORED
-            Color.black.edgesIgnoringSafeArea(.all)
+            // Background adapts to color scheme
+            (colorScheme == .dark ? Color.black : Color(NSColor.windowBackgroundColor))
+                .edgesIgnoringSafeArea(.all)
 
             // Your existing NavigationView
             NavigationView {
@@ -93,6 +95,7 @@ struct ContentView: View {
 
 struct ChatView: View {
     // Removed binding for sidebar visibility
+    @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
     
     // Optional: Receive history item to potentially load chat
     var historyItem: ChatHistoryItem? = nil
@@ -119,8 +122,8 @@ struct ChatView: View {
                     .padding(.horizontal)
                     .padding(.top) // Add padding at the top of the messages list
                 }
-                // Set background of the scrollable content area to the system window background color
-                .background(Color(NSColor.windowBackgroundColor))
+                // Set background based on color scheme
+                .background(colorScheme == .dark ? Color.black : Color(NSColor.windowBackgroundColor))
                 .onChange(of: messages) { oldValue, newValue in // Observe the whole array for changes
                     // Ensure scrolling happens only when count increases and the last message is new
                     if newValue.count > oldValue.count, let lastMessage = newValue.last { 
@@ -138,11 +141,16 @@ struct ChatView: View {
                     .textFieldStyle(.plain)
                     .frame(minHeight: 30)
                     // Remove specific TextField styling (background, clip, overlay)
+                    .foregroundColor(colorScheme == .dark ? .nuevoLightGray : .primary)
+                    .onSubmit { // Call sendMessage when Enter is pressed
+                        sendMessage()
+                    }
 
                 Button(action: sendMessage) {
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 24))
-                        .foregroundColor(newMessageText.isEmpty ? .gray.opacity(0.5) : .blue)
+                        // Use nuevoOrange when enabled, slightly dimmer/grayer when disabled
+                        .foregroundColor(newMessageText.isEmpty ? .gray.opacity(0.6) : .nuevoOrange)
                 }
                 .buttonStyle(.plain)
                 .disabled(newMessageText.isEmpty)
@@ -151,20 +159,22 @@ struct ChatView: View {
             // Apply styling to the HStack to create the 'island'
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
-            .background(Color.gray.opacity(0.1))
+            // Set background based on color scheme
+            .background(colorScheme == .dark ? Color.nuevoInputBackground : Color(white: 0.95))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .stroke(Color.gray.opacity(0.2), lineWidth: 1)
+                    // Set stroke based on color scheme
+                    .stroke(colorScheme == .dark ? Color.nuevoStroke : Color.gray.opacity(0.2), lineWidth: 1)
             )
             .padding(.horizontal, 20) // Padding outside the island for centering
             .padding(.bottom, 10) // Padding below the island
             .frame(maxWidth: 800) // Keep the max width constraint
         }
-        // Set the background of the entire VStack to the system window background color
-        .background(Color(NSColor.windowBackgroundColor))
+        // Set the background of the entire VStack based on color scheme
+        .background(colorScheme == .dark ? Color.black : Color(NSColor.windowBackgroundColor))
         // Use the selected chat title if available, otherwise default
-        .navigationTitle(historyItem?.title ?? "Chatbot")
+        .navigationTitle(historyItem?.title ?? "cupertino.ink")
     }
 
     // Function to handle sending a message
@@ -209,6 +219,7 @@ struct ChatView: View {
 // Separate View for Message Bubble Styling
 struct MessageView: View {
     let message: Message
+    @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
 
     var body: some View {
         HStack {
@@ -220,9 +231,9 @@ struct MessageView: View {
                  Text(message.text)
                     .padding(.horizontal, 12)
                     .padding(.vertical, 8)
-                    // Use gray with opacity for a light background, compatible across versions
-                    .background(message.isUser ? Color.blue : Color.gray.opacity(0.1))
-                    .foregroundColor(message.isUser ? .white : .primary)
+                    // Use new color scheme for messages, adapting to light/dark mode
+                    .background(message.isUser ? Color.nuevoOrange : (colorScheme == .dark ? Color.nuevoDarkGray : Color(white: 0.9)))
+                    .foregroundColor(message.isUser ? .white : (colorScheme == .dark ? .nuevoLightGray : .primary))
                     .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous)) // Nicer rounding
                     // Add specific corner masking if needed for 'tail' effect (more complex)
             }
@@ -245,4 +256,5 @@ private func toggleSidebar() {
 #Preview {
     // Preview the main ContentView which now includes the sidebar
     ContentView()
+        // Remove preferred color scheme to see both light and dark previews
 }

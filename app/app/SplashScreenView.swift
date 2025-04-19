@@ -2,7 +2,7 @@ import SwiftUI
 import Combine
 
 // Define the custom color
-let hdrCoralBlue = Color(red: 0.1, green: 0.7, blue: 0.9)
+// let hdrCoralBlue = Color(red: 0.1, green: 0.7, blue: 0.9)
 
 struct SplashScreenView: View {
     // State to control the text visibility/animation
@@ -20,22 +20,22 @@ struct SplashScreenView: View {
 
     var body: some View {
         ZStack {
-            // Metal View for the HDR background
-            MetalViewRepresentable()
+            // Orange background
+            Color.nuevoOrange
                 .edgesIgnoringSafeArea(.all)
 
             // Text Overlay
-            VStack(spacing: 0) {
-                Text("welcome to")
-                    .font(.system(size: 24, weight: .light))
-                    .textCase(.lowercase)
-                    .foregroundColor(.white.opacity(0.8))
+            // VStack(spacing: 0) { // Removed VStack
+                // Text("welcome to")
+                //     .font(.system(size: 24, weight: .light))
+                //     .textCase(.lowercase)
+                //     .foregroundColor(.white.opacity(0.8))
 
                 Text("cupertino.ink")
-                    .font(.system(size: 48, weight: .bold))
+                    .font(.system(size: 60, weight: .heavy)) // Use heavy weight and larger size
                     .textCase(.lowercase)
-                    .foregroundColor(.white)
-            }
+                    .foregroundColor(.white) // Use solid white for better contrast
+            // }
             // Animate opacity based on state
             .opacity(showText ? (fadeOutText ? 0.0 : 1.0) : 0.0)
             // Optional: add a slight scale effect on fade out
@@ -68,4 +68,5 @@ struct SplashScreenView: View {
 
 #Preview {
     SplashScreenView(onFinished: { print("Splash finished!") })
+        .preferredColorScheme(.dark) // Preview with dark scheme to match orange background intent
 } 

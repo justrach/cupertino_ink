@@ -21,7 +21,7 @@ struct appApp: App {
                             showSplashScreen = false
                         }
                     }
-                    .transition(.opacity) // Fade transition for the splash screen view
+                    .transition(.opacity) // Fade transition for the splash screen vieimage.pngw
                 } else {
                     ContentView() // Show main content
                          .transition(.opacity) // Fade transition for the content view
