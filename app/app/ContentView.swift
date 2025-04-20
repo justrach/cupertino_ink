@@ -12,10 +12,21 @@ import Foundation // Needed for URLSession, JSONEncoder/Decoder etc.
 
 // Define a structure for chat messages
 struct Message: Identifiable, Equatable {
-    let id = UUID()
-    var text: String // Use var to allow incremental updates
-    let isUser: Bool // To differentiate user messages (could be used for styling)
-    // let isInternal: Bool = false // Optional: for messages not shown directly (like tool results)
+    let id: UUID // Changed: Make it a let, initialize below
+    var text: String 
+    let isUser: Bool
+    
+    // Initializer to allow passing an ID
+    init(id: UUID = UUID(), text: String, isUser: Bool) {
+        self.id = id
+        self.text = text
+        self.isUser = isUser
+    }
+
+    // Required for Equatable conformance if we only compare IDs
+    static func == (lhs: Message, rhs: Message) -> Bool {
+        lhs.id == rhs.id
+    }
 }
 
 // Define a structure for mock chat history
@@ -253,7 +264,7 @@ class ChatViewModel: ObservableObject {
             shouldContinueLoop = false
             let botResponsePlaceholderId = UUID()
             await MainActor.run { // Ensure placeholder is added on main thread before await
-                 messages.append(Message(text: "", isUser: false))
+                 messages.append(Message(id: botResponsePlaceholderId, text: "", isUser: false))
             }
 
             // Add logging for history before API call
@@ -274,8 +285,15 @@ class ChatViewModel: ObservableObject {
                 tool_choice: "auto",
                 stream: true
             )
-            guard let url = URL(string: baseURL) else {
-                updateBotMessage(id: botResponsePlaceholderId, text: "Error: Invalid API URL")
+            guard let url = URL(string: baseURL) else { 
+                let errorText = "Error: Invalid API URL"
+                print(errorText)
+                await MainActor.run {
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        messages[index].text = errorText
+                    } else { messages.append(Message(text: errorText, isUser: false)) }
+                }
+                isSending = false
                 return
             }
             var request = URLRequest(url: url)
@@ -286,15 +304,19 @@ class ChatViewModel: ObservableObject {
             do {
                 request.httpBody = try jsonEncoder.encode(requestBody)
             } catch {
-                updateBotMessage(id: botResponsePlaceholderId, text: "Error: Failed to encode request: \(error.localizedDescription)")
+                let errorText = "Error: Failed to encode request: \(error.localizedDescription)"
+                print(errorText)
+                await MainActor.run {
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        messages[index].text = errorText
+                    } else { messages.append(Message(text: errorText, isUser: false)) }
+                }
                 isSending = false
                 return
             }
 
             var accumulatedResponse = ""
             var finalFinishReason: String? = nil
-            var detectedRawToolCallTag = false
-            var triggerUIUpdate = false
 
             do {
                  print("--- Starting API Call (Turn) ---")
@@ -323,36 +345,27 @@ class ChatViewModel: ObservableObject {
                                 
                                 if let contentDelta = choice.delta.content {
                                     accumulatedResponse += contentDelta
-                                    triggerUIUpdate = false
-
-                                    if !detectedRawToolCallTag {
-                                        if contentDelta.contains("<tool_call>") {
-                                            detectedRawToolCallTag = true
-                                            print(">>> Detected <tool_call> tag in stream, updating UI <<<")
-                                            updateBotMessage(id: botResponsePlaceholderId, text: "[Processing Tools...]")
-                                        } else {
-                                            if contentDelta.containsWhitespace { 
-                                                triggerUIUpdate = true
-                                            }
-                                        }
-                                    }
-                                    
-                                    if triggerUIUpdate && !detectedRawToolCallTag {
-                                        updateBotMessage(id: botResponsePlaceholderId, text: accumulatedResponse)
-                                    }
                                 }
                             }
                         } catch { print("SSE Decode Error: \(error) for data: \(String(data: data, encoding: .utf8) ?? "invalid utf8")") }
                     }
                 }
-                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A"). Detected Tag: \(detectedRawToolCallTag). Accumulated Response: \(accumulatedResponse)")
+                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A"). Accumulated Response: \(accumulatedResponse)")
 
             } catch is CancellationError {
                  print("Task Cancelled during stream.")
                  shouldContinueLoop = false // Ensure loop terminates if cancelled
             } catch { // Handle URLSession errors, HTTP errors, etc.
                  print("Network/Stream Error: \(error)")
-                 updateBotMessage(id: botResponsePlaceholderId, text: "Error: \(error.localizedDescription)")
+                 // Update UI directly with error message if stream fails before completion
+                 let errorText = "Error: \(error.localizedDescription)"
+                 await MainActor.run {
+                     if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                         messages[index].text = errorText
+                     } else { // Fallback if placeholder somehow doesn't exist on error
+                         messages.append(Message(text: errorText, isUser: false))
+                     }
+                 }
                  shouldContinueLoop = false
             }
 
@@ -375,59 +388,50 @@ class ChatViewModel: ObservableObject {
             }
             print("Parsed and assembled \(assembledToolCalls.count) tool calls from final accumulated text.")
 
-            // --- Process Results based on PARSED calls ---
-            // Use MainActor.run for final UI updates to ensure correct thread and avoid async issues
+            // --- Process Results - Single final UI update block ---
             await MainActor.run {
+                // Always find the placeholder index first
+                let placeholderIndex = messages.firstIndex(where: { $0.id == botResponsePlaceholderId })
+                
                 if !assembledToolCalls.isEmpty {
                     print("Proceeding with tool call execution (\(assembledToolCalls.count) calls).")
                     shouldContinueLoop = true
-                    // Update UI definitively to show processing state - DIRECTLY
-                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
-                        messages[index].text = "[Processing Tools...]"
+                    
+                    // Remove placeholder and append status message
+                    if let index = placeholderIndex {
+                        messages.remove(at: index)
+                        messages.append(Message(text: "[Processing Tools...]", isUser: false)) // Append final status
                     } else {
-                        print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to update status for tool call.")
-                        // Fallback: Append status if placeholder missing?
-                        // messages.append(Message(text: "[Processing Tools...]", isUser: false))
+                        print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to remove before showing tool status.")
+                        messages.append(Message(text: "[Processing Tools...]", isUser: false)) // Append status anyway as fallback
                     }
-
-                    // Add Assistant message REQUESTING tools to history
+                    
+                    // Add tool call request to history (doesn't affect UI directly here)
                     let toolCallDictsForHistory: [[String: Any]] = assembledToolCalls.map { tc in
                         ["id": tc.id, "type": "function", "function": ["name": tc.functionName, "arguments": tc.arguments]]
                     }
                     messageHistory.append(["role": "assistant", "tool_calls": toolCallDictsForHistory, "content": NSNull()])
 
-                    // Execute tools and add results (execution needs to be outside MainActor.run)
-                    // We will execute tools *after* this UI update block
-
                 } else {
-                    // No tool calls PARSED
+                    // No tool calls parsed
                     shouldContinueLoop = false
                     print("No tool calls parsed. Handling final response.")
                     let finalContent = accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines)
 
-                    // Update UI definitively with the final text OR remove placeholder - DIRECTLY
-                    if !finalContent.isEmpty {
-                        if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
-                            messages[index].text = finalContent
-                            // Add final assistant text message to history (only if content exists)
-                            messageHistory.append(["role": "assistant", "content": finalContent])
-                            print("Final assistant text message added to history.")
-                        } else {
-                            print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to update final text. Appending new.")
-                            // Fallback: Append if placeholder missing
-                            messages.append(Message(text: finalContent, isUser: false))
-                            messageHistory.append(["role": "assistant", "content": finalContent])
-                            print("Final assistant text message added to history via fallback append.")
-                        }
-
+                    // Remove placeholder first
+                    if let index = placeholderIndex {
+                        messages.remove(at: index)
                     } else {
-                        // Final content is empty, remove placeholder
-                        if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
-                            messages.remove(at: index)
-                            print("Removed empty placeholder message as final response was empty.")
-                        } else {
-                            print("Final content empty, placeholder \(botResponsePlaceholderId) not found.")
-                        }
+                        print("Warning: Could not find placeholder message ID \(botResponsePlaceholderId) to remove for final text.")
+                    }
+                    
+                    // Append final content only if it's not empty
+                    if !finalContent.isEmpty {
+                        messages.append(Message(text: finalContent, isUser: false)) // Append final message
+                        messageHistory.append(["role": "assistant", "content": finalContent])
+                        print("Final assistant text message added to history.")
+                    } else {
+                        print("Final content was empty, placeholder removed, nothing to append.")
                     }
                 }
             } // End MainActor.run for final UI/history update
@@ -452,19 +456,6 @@ class ChatViewModel: ObservableObject {
         } // End while loop
         print("--- Interaction Loop Finished ---")
         await MainActor.run { isSending = false } // Ensure state change is on main thread
-    }
-
-    // Update helper - Still used for intermediate stream updates
-    private func updateBotMessage(id: UUID, text: String) {
-        // Run UI updates on the main thread
-        DispatchQueue.main.async {
-            if let index = self.messages.firstIndex(where: { $0.id == id }) {
-                self.messages[index].text = text
-            } else {
-                // Only print warning, do not append new message during stream updates
-                print("Warning: updateBotMessage couldn't find message with ID \(id). Text: '\(text)'. Doing nothing.")
-            }
-        }
     }
 
     // --- Tool Call Parsing --- 
