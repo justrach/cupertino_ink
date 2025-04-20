@@ -193,13 +193,8 @@ extension String {
 }
 
 // Re-add necessary structs for parsing
-struct RawToolCall: Decodable {
-    let name: String
-    let arguments: [String: String]
-}
-
 struct ParsedToolCall {
-    let id: String = "call_\(UUID().uuidString.prefix(12))" // Generate ID during parsing
+    let id: String = "call_\(UUID().uuidString.prefix(12))"
     let type: String = "function"
     let function: FunctionCall
     struct FunctionCall {
@@ -458,29 +453,76 @@ class ChatViewModel: ObservableObject {
         await MainActor.run { isSending = false } // Ensure state change is on main thread
     }
 
-    // --- Tool Call Parsing --- 
+    // --- Tool Call Parsing (Robust Version) --- 
     private func parseToolCalls(from text: String) -> [ParsedToolCall] {
         var calls: [ParsedToolCall] = []
-        guard let regex = try? NSRegularExpression(pattern: "<tool_call>(.*?)</tool_call>", options: [.dotMatchesLineSeparators]) else {
-            print("Error: Invalid regex for tool call parsing.")
-            return []
-        }
+        guard let regex = try? NSRegularExpression(pattern: "<tool_call>(.*?)</tool_call>", options: [.dotMatchesLineSeparators]) else { return [] }
         let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
+        let decoder = JSONDecoder() // Still needed for secondary string decode
+
         regex.enumerateMatches(in: text, options: [], range: nsRange) { match, _, _ in
             guard let match = match, match.numberOfRanges == 2 else { return }
-            let jsonRange = match.range(at: 1)
-            if let swiftRange = Range(jsonRange, in: text) {
-                let jsonString = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let jsonData = jsonString.data(using: .utf8) else { return }
-                do {
-                    let decoder = JSONDecoder()
-                    let rawCall = try decoder.decode(RawToolCall.self, from: jsonData)
-                    // Create ParsedToolCall with the dictionary
-                    calls.append(ParsedToolCall(function: .init(name: rawCall.name, arguments: rawCall.arguments)))
-                    print("Successfully decoded tool call: \(rawCall.name) with args: \(rawCall.arguments)")
-                } catch { 
-                    print("Error decoding tool call JSON: \(error) - JSON: \(jsonString)")
+            let jsonContentRange = match.range(at: 1)
+            guard let swiftRange = Range(jsonContentRange, in: text) else { return }
+            
+            let jsonString = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let jsonData = jsonString.data(using: .utf8) else { 
+                print("Error: Could not convert extracted JSON string to data: \(jsonString)")
+                return 
+            }
+            
+            do {
+                // Step 1: Use JSONSerialization for generic dictionary
+                guard let genericCallData = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any] else {
+                    print("Error: Failed to parse extracted JSON using JSONSerialization: \(jsonString)")
+                    return
                 }
+                
+                // Step 2: Extract name
+                guard let name = genericCallData["name"] as? String else {
+                    print("Error: Could not find or cast 'name' to String in JSON: \(jsonString)")
+                    return
+                }
+                
+                // Step 3: Process arguments (logic remains largely the same)
+                var argumentsDict: [String: String]? = nil
+                if let argsValue = genericCallData["arguments"] {
+                    if let dict = argsValue as? [String: String] { // Check if already a dictionary
+                        argumentsDict = dict
+                        print("Arguments for '\(name)' were already a dictionary: \(dict)")
+                    } else if let stringArgs = argsValue as? String { // Check if it's a string
+                        print("Arguments for '\(name)' is a string: \(stringArgs). Attempting secondary decode.")
+                        if let stringArgsData = stringArgs.data(using: .utf8) {
+                            do {
+                                // Use JSONDecoder for the secondary decode of the string
+                                argumentsDict = try decoder.decode([String: String].self, from: stringArgsData)
+                                print("Successfully decoded arguments string to dict: \(argumentsDict!)")
+                            } catch {
+                                print("Error decoding arguments string to dictionary for \(name): \(error) - Arguments String: \(stringArgs)")
+                            }
+                        } else {
+                             print("Error converting arguments string to data for secondary parse: \(stringArgs)")
+                        }
+                    } else {
+                        // Unexpected type for arguments
+                        print("Warning: Unexpected type for arguments field for \(name): \(type(of: argsValue)). JSON: \(jsonString)")
+                    }
+                } else {
+                     print("Warning: No 'arguments' field found for \(name). JSON: \(jsonString)")
+                     argumentsDict = [:] // Default to empty args if missing
+                }
+                
+                // Step 4: Create ParsedToolCall if successful
+                if let finalArgs = argumentsDict {
+                    calls.append(ParsedToolCall(function: .init(name: name, arguments: finalArgs)))
+                    print("Successfully parsed tool call: \(name)")
+                } else {
+                     print("Skipping tool call \(name) due to argument parsing failure.")
+                }
+
+            } catch {
+                // Error during JSONSerialization
+                print("Error using JSONSerialization: \(error) - JSON: \(jsonString)")
             }
         }
         print("Parsed \(calls.count) calls from text within parseToolCalls func.")
@@ -639,14 +681,18 @@ struct ChatView: View {
 
     var body: some View {
         VStack(spacing: 0) { // Remove spacing between ScrollView and Input area
-            // Scrollable view for messages
             ScrollViewReader { proxy in // Add ScrollViewReader
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 12) { // Use LazyVStack for performance
-                        // Use viewModel.messages
                         ForEach(viewModel.messages) { message in
-                            MessageView(message: message)
-                                .id(message.id) // Add ID for scrolling
+                            // Conditional View Rendering
+                            if message.text == "[Processing Tools...]" {
+                                ProcessingIndicatorView()
+                                    .id(message.id) // Keep ID for scrolling
+                            } else {
+                                MessageView(message: message)
+                                    .id(message.id) // Keep ID for scrolling
+                            }
                         }
                     }
                     .padding(.horizontal)
@@ -748,6 +794,29 @@ struct MessageView: View {
                 Spacer() // Push bot messages to the left
             }
         }
+    }
+}
+
+// --- ADD New View for Processing Indicator ---
+struct ProcessingIndicatorView: View {
+    @Environment(\.colorScheme) var colorScheme
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small) // Make the spinner smaller
+                .colorMultiply(colorScheme == .dark ? .nuevoLightGray : .primary) // Match text color
+            Text("[Processing Tools...]")
+                .font(.body)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        // Apply same styling as bot messages
+        .background(colorScheme == .dark ? Color.nuevoDarkGray : Color(white: 0.9))
+        .foregroundColor(colorScheme == .dark ? .nuevoLightGray : .primary)
+        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading) // Align to left like bot messages
+        .padding(.horizontal) // Add horizontal padding like MessageView's container does
     }
 }
 
