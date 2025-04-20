@@ -11,19 +11,19 @@ import Combine // Still needed for ObservableObject
 import Foundation // Needed for URLSession, JSONEncoder/Decoder etc.
 
 // Define a structure for chat messages
-struct Message: Identifiable, Equatable {
-    let id: UUID // Changed: Make it a let, initialize below
-    var text: String 
+// Change to class conforming to ObservableObject
+class Message: Identifiable, ObservableObject, Equatable {
+    let id: UUID
+    @Published var text: String // Mark text as Published
     let isUser: Bool
     
-    // Initializer to allow passing an ID
     init(id: UUID = UUID(), text: String, isUser: Bool) {
         self.id = id
         self.text = text
         self.isUser = isUser
     }
 
-    // Required for Equatable conformance if we only compare IDs
+    // Equatable conformance remains the same (based on ID)
     static func == (lhs: Message, rhs: Message) -> Bool {
         lhs.id == rhs.id
     }
@@ -59,42 +59,6 @@ struct ChatCompletionRequestBody: Encodable {
     let tool_choice: String?
     let stream: Bool
     // Add other parameters like temperature if needed
-}
-
-// Helper to encode complex dictionary values like tool parameters
-struct AnyEncodable: Encodable {
-    private let value: Any
-
-    init(_ value: Any) {
-        self.value = value
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch value {
-        case let encodable as Encodable:
-            // Check if the value itself is Encodable and encode it directly.
-            // This requires careful handling to avoid infinite recursion if AnyEncodable wraps itself.
-            // A more robust solution might involve type checking against known Encodable types.
-            try encodable.encode(to: encoder)
-        case is NSNull:
-            try container.encodeNil()
-        case let bool as Bool:
-            try container.encode(bool)
-        case let int as Int:
-            try container.encode(int)
-        case let double as Double:
-            try container.encode(double)
-        case let string as String:
-            try container.encode(string)
-        case let array as [Any]:
-             try container.encode(array.map { AnyEncodable($0) })
-        case let dictionary as [String: Any]:
-             try container.encode(dictionary.mapValues { AnyEncodable($0) })
-        default:
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: container.codingPath, debugDescription: "Value not encodable"))
-        }
-    }
 }
 
 // Represents the overall structure of an SSE data chunk
@@ -153,37 +117,7 @@ let modelName = "mlx-community/Qwen2.5-7B-Instruct-1M-4bit" // Your model
 
 // --- Tool Definitions (Simple Dictionaries) ---
 // Matches the API structure: https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools
-let findOrderToolDict: [String: AnyEncodable] = [
-    "type": AnyEncodable("function"),
-    "function": AnyEncodable([
-        "name": AnyEncodable("find_order_by_name"),
-        "description": AnyEncodable("Finds a customer's order ID based on their name..."),
-        "parameters": AnyEncodable([
-            "type": AnyEncodable("object"),
-            "properties": AnyEncodable([
-                "customer_name": AnyEncodable(["type": AnyEncodable("string"), "description": AnyEncodable("The full name...")])
-            ]),
-            "required": AnyEncodable(["customer_name"])
-        ])
-    ])
-]
-
-let getDeliveryDateToolDict: [String: AnyEncodable] = [
-    "type": AnyEncodable("function"),
-    "function": AnyEncodable([
-        "name": AnyEncodable("get_delivery_date"),
-        "description": AnyEncodable("Get the estimated delivery date..."),
-        "parameters": AnyEncodable([
-            "type": AnyEncodable("object"),
-            "properties": AnyEncodable([
-                "order_id": AnyEncodable(["type": AnyEncodable("string"), "description": AnyEncodable("The customer's unique order identifier.")])
-            ]),
-            "required": AnyEncodable(["order_id"])
-        ])
-    ])
-]
-
-let availableToolsDict: [[String: AnyEncodable]]? = [findOrderToolDict, getDeliveryDateToolDict]
+// ... existing code ...
 
 // Helper extension for checking whitespace
 extension String {
@@ -310,8 +244,10 @@ class ChatViewModel: ObservableObject {
                 return
             }
 
-            var accumulatedResponse = ""
+            // No longer accumulate full response here: var accumulatedResponse = ""
             var finalFinishReason: String? = nil
+            // --- Tool Call Accumulation ---
+            var toolCallAccumulator: [Int: (id: String?, name: String?, arguments: String)] = [:] // Index -> Partial Tool Call
 
             do {
                  print("--- Starting API Call (Turn) ---")
@@ -328,205 +264,160 @@ class ChatViewModel: ObservableObject {
 
                 // Process the stream line by line
                 for try await line in bytes.lines {
+                    print("[SSE Raw Line]: \(line)") // Corrected syntax
                     guard !Task.isCancelled else { throw CancellationError() }
                     if line.hasPrefix("data:") {
-                        guard let data = line.dropFirst(5).trimmingCharacters(in: .whitespaces).data(using: .utf8), !data.isEmpty else { continue } 
-                        if String(data: data, encoding: .utf8) == "[DONE]" { break } // Check for [DONE] signal
+                        let dataString = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
+                        print("[SSE Data String]: \(dataString)") // Corrected syntax
+                        guard let data = dataString.data(using: .utf8), !data.isEmpty else { continue }
+                        if String(data: data, encoding: .utf8) == "[DONE]" {
+                             print("[SSE Signal]: Received [DONE]")
+                             break
+                        }
                         
                         do {
                             let chunk = try jsonDecoder.decode(SSEChunk.self, from: data)
+                            print("[SSE Decoded Chunk]: \(chunk)") // Corrected syntax
                             if let choice = chunk.choices?.first {
+                                print("[SSE Decoded Delta]: \(choice.delta)") // Corrected syntax
+                                // Store finish reason when available
                                 if let reason = choice.finish_reason { finalFinishReason = reason }
-                                
-                                if let contentDelta = choice.delta.content {
-                                    accumulatedResponse += contentDelta
+
+                                // -- Handle Content Delta --
+                                if let contentDelta = choice.delta.content, !contentDelta.isEmpty {
+                                    await MainActor.run {
+                                        if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                                            // Now that Message is a class and text is @Published,
+                                            // directly modifying the property should trigger UI update.
+                                            messages[index].text += contentDelta 
+                                        } else {
+                                            print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to stream content.")
+                                        }
+                                    }
+                                }
+
+                                // -- Handle Tool Call Deltas --
+                                if let toolCallChunks = choice.delta.tool_calls {
+                                     for chunk in toolCallChunks {
+                                        let index = chunk.index
+                                        // Get or create the accumulator entry
+                                        var currentCall = toolCallAccumulator[index] ?? (id: nil, name: nil, arguments: "")
+
+                                        if let id = chunk.id { currentCall.id = id }
+                                        if let function = chunk.function {
+                                            if let name = function.name { currentCall.name = name }
+                                            if let argsChunk = function.arguments { currentCall.arguments += argsChunk }
+                                        }
+                                        toolCallAccumulator[index] = currentCall
+                                    }
                                 }
                             }
                         } catch { print("SSE Decode Error: \(error) for data: \(String(data: data, encoding: .utf8) ?? "invalid utf8")") }
                     }
                 }
-                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A"). Accumulated Response: \(accumulatedResponse)")
+                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A")")
 
             } catch is CancellationError {
                  print("Task Cancelled during stream.")
                  shouldContinueLoop = false // Ensure loop terminates if cancelled
             } catch { // Handle URLSession errors, HTTP errors, etc.
                  print("Network/Stream Error: \(error)")
-                 // Update UI directly with error message if stream fails before completion
                  let errorText = "Error: \(error.localizedDescription)"
                  await MainActor.run {
                      if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
-                         messages[index].text = errorText
-                     } else { // Fallback if placeholder somehow doesn't exist on error
+                         messages[index].text = errorText // Update placeholder with error
+                     } else {
                          messages.append(Message(text: errorText, isUser: false))
                      }
                  }
                  shouldContinueLoop = false
             }
 
-            // --- PARSE final accumulated response for tool calls --- 
-            let parsedToolCalls = parseToolCalls(from: accumulatedResponse)
+            // --- Assemble Final Tool Calls (if any) ---
             var assembledToolCalls: [AssembledToolCall] = []
-            for parsedCall in parsedToolCalls {
-                do {
-                    let argumentsData = try JSONEncoder().encode(parsedCall.function.arguments)
-                    guard let argumentsString = String(data: argumentsData, encoding: .utf8) else {
-                        print("Warning: Could not re-encode arguments dictionary to JSON string for \(parsedCall.function.name)")
-                        continue // Skip this call if encoding fails
+            // Assume normal completion unless we explicitly got "tool_calls"
+            var treatAsNormalCompletion = true 
+            
+            if finalFinishReason == "tool_calls" {
+                shouldContinueLoop = true // Signal to execute tools and loop back
+                treatAsNormalCompletion = false // It's not a normal completion, it's a tool call request
+                for (index, partialCall) in toolCallAccumulator.sorted(by: { $0.key < $1.key }) { // Ensure order
+                    guard let id = partialCall.id, let name = partialCall.name else {
+                         print("Warning: Incomplete tool call data at index \(index): ID or Name missing.")
+                         continue
                     }
-                    assembledToolCalls.append(
-                        AssembledToolCall(index: 0, id: parsedCall.id, functionName: parsedCall.function.name, arguments: argumentsString)
-                    )
-                } catch {
-                    print("Warning: Failed to re-encode arguments dictionary: \(error) for \(parsedCall.function.name)")
+                    assembledToolCalls.append(AssembledToolCall(index: index, id: id, functionName: name, arguments: partialCall.arguments))
                 }
+                print("Assembled \(assembledToolCalls.count) tool calls from stream.")
+            } else if Task.isCancelled {
+                 // If cancelled, don't treat as normal completion, let UI state handle itself
+                 treatAsNormalCompletion = false
+                 shouldContinueLoop = false 
             }
-            print("Parsed and assembled \(assembledToolCalls.count) tool calls from final accumulated text.")
+            // If finalFinishReason is nil and not cancelled, treatAsNormalCompletion remains true
+            // and shouldContinueLoop will become false in the next step.
 
-            // --- Process Results - Single final UI update block ---
+            // Update shouldContinueLoop based on the final decision
+            if treatAsNormalCompletion {
+                shouldContinueLoop = false
+            }
+
+            // --- Process Results - Update UI and History Based on Completion Type ---
             await MainActor.run {
-                // Always find the placeholder index first
                 let placeholderIndex = messages.firstIndex(where: { $0.id == botResponsePlaceholderId })
-                
-                if !assembledToolCalls.isEmpty {
+
+                if !treatAsNormalCompletion && !assembledToolCalls.isEmpty { // Tool Calls Path
                     print("Proceeding with tool call execution (\(assembledToolCalls.count) calls).")
-                    shouldContinueLoop = true
-                    
-                    // Remove placeholder and append status message
+                    // Replace placeholder content with "[Processing Tools...]" message
                     if let index = placeholderIndex {
-                        messages.remove(at: index)
-                        messages.append(Message(text: "[Processing Tools...]", isUser: false)) // Append final status
+                        messages[index].text = "[Processing Tools...]" // Update existing message
                     } else {
-                        print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to remove before showing tool status.")
-                        messages.append(Message(text: "[Processing Tools...]", isUser: false)) // Append status anyway as fallback
+                        print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to update for tool status.")
+                        messages.append(Message(text: "[Processing Tools...]", isUser: false))
                     }
-                    
-                    // Add tool call request to history (doesn't affect UI directly here)
+                    // Add assistant message with tool calls to history
                     let toolCallDictsForHistory: [[String: Any]] = assembledToolCalls.map { tc in
                         ["id": tc.id, "type": "function", "function": ["name": tc.functionName, "arguments": tc.arguments]]
                     }
                     messageHistory.append(["role": "assistant", "tool_calls": toolCallDictsForHistory, "content": NSNull()])
+                    print("Assistant message with tool_calls added to history.")
 
-                } else {
-                    // No tool calls parsed
-                    shouldContinueLoop = false
-                    print("No tool calls parsed. Handling final response.")
-                    let finalContent = accumulatedResponse.trimmingCharacters(in: .whitespacesAndNewlines)
-
-                    // Remove placeholder first
-                    if let index = placeholderIndex {
-                        messages.remove(at: index)
+                } else if treatAsNormalCompletion, let index = placeholderIndex { // Normal Completion Path (Stop or nil finishReason)
+                    print("Stream finished normally or without explicit stop signal. Finalizing response in UI.")
+                    let finalContent = messages[index].text // Get the fully streamed content
+                    if finalContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                         print("Final streamed content is empty, removing placeholder message.")
+                         messages.remove(at: index)
                     } else {
-                        print("Warning: Could not find placeholder message ID \(botResponsePlaceholderId) to remove for final text.")
-                    }
-                    
-                    // Append final content only if it's not empty
-                    if !finalContent.isEmpty {
-                        messages.append(Message(text: finalContent, isUser: false)) // Append final message
                         messageHistory.append(["role": "assistant", "content": finalContent])
                         print("Final assistant text message added to history.")
-                    } else {
-                        print("Final content was empty, placeholder removed, nothing to append.")
                     }
+                } else if placeholderIndex == nil && !Task.isCancelled {
+                     // Log warning only if not cancelled and placeholder is missing
+                     print("Warning: Placeholder message not found after stream completion.")
                 }
-            } // End MainActor.run for final UI/history update
+                // If cancelled, no final UI/History update needed here
+            } // End MainActor.run
 
             // --- Execute Tools (if needed, outside MainActor block) ---
-             if shouldContinueLoop && !assembledToolCalls.isEmpty { // Check flag again
+            // This check now correctly uses shouldContinueLoop which was determined above
+             if shouldContinueLoop && !assembledToolCalls.isEmpty {
                  var toolResultsForHistory: [[String: Any]] = []
                  for toolCall in assembledToolCalls {
                      let result = await executeToolCall(toolCall)
                      toolResultsForHistory.append(["role": "tool", "tool_call_id": toolCall.id, "content": result.content])
                  }
-                 // Append tool results to history (must be done after potential UI updates)
+                 // Append tool results to history *after* execution
                  await MainActor.run { // Modify history on main thread
                     messageHistory.append(contentsOf: toolResultsForHistory)
                  }
                  print("Tool results added. Looping back.")
-             } else {
-                 // Ensure loop stops if no tool calls were processed
-                 shouldContinueLoop = false
              }
+             // No 'else' needed, shouldContinueLoop dictates the next iteration
 
         } // End while loop
         print("--- Interaction Loop Finished ---")
         await MainActor.run { isSending = false } // Ensure state change is on main thread
-    }
-
-    // --- Tool Call Parsing (Robust Version) --- 
-    private func parseToolCalls(from text: String) -> [ParsedToolCall] {
-        var calls: [ParsedToolCall] = []
-        guard let regex = try? NSRegularExpression(pattern: "<tool_call>(.*?)</tool_call>", options: [.dotMatchesLineSeparators]) else { return [] }
-        let nsRange = NSRange(text.startIndex..<text.endIndex, in: text)
-        let decoder = JSONDecoder() // Still needed for secondary string decode
-
-        regex.enumerateMatches(in: text, options: [], range: nsRange) { match, _, _ in
-            guard let match = match, match.numberOfRanges == 2 else { return }
-            let jsonContentRange = match.range(at: 1)
-            guard let swiftRange = Range(jsonContentRange, in: text) else { return }
-            
-            let jsonString = String(text[swiftRange]).trimmingCharacters(in: .whitespacesAndNewlines)
-            guard let jsonData = jsonString.data(using: .utf8) else { 
-                print("Error: Could not convert extracted JSON string to data: \(jsonString)")
-                return 
-            }
-            
-            do {
-                // Step 1: Use JSONSerialization for generic dictionary
-                guard let genericCallData = try JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any] else {
-                    print("Error: Failed to parse extracted JSON using JSONSerialization: \(jsonString)")
-                    return
-                }
-                
-                // Step 2: Extract name
-                guard let name = genericCallData["name"] as? String else {
-                    print("Error: Could not find or cast 'name' to String in JSON: \(jsonString)")
-                    return
-                }
-                
-                // Step 3: Process arguments (logic remains largely the same)
-                var argumentsDict: [String: String]? = nil
-                if let argsValue = genericCallData["arguments"] {
-                    if let dict = argsValue as? [String: String] { // Check if already a dictionary
-                        argumentsDict = dict
-                        print("Arguments for '\(name)' were already a dictionary: \(dict)")
-                    } else if let stringArgs = argsValue as? String { // Check if it's a string
-                        print("Arguments for '\(name)' is a string: \(stringArgs). Attempting secondary decode.")
-                        if let stringArgsData = stringArgs.data(using: .utf8) {
-                            do {
-                                // Use JSONDecoder for the secondary decode of the string
-                                argumentsDict = try decoder.decode([String: String].self, from: stringArgsData)
-                                print("Successfully decoded arguments string to dict: \(argumentsDict!)")
-                            } catch {
-                                print("Error decoding arguments string to dictionary for \(name): \(error) - Arguments String: \(stringArgs)")
-                            }
-                        } else {
-                             print("Error converting arguments string to data for secondary parse: \(stringArgs)")
-                        }
-                    } else {
-                        // Unexpected type for arguments
-                        print("Warning: Unexpected type for arguments field for \(name): \(type(of: argsValue)). JSON: \(jsonString)")
-                    }
-                } else {
-                     print("Warning: No 'arguments' field found for \(name). JSON: \(jsonString)")
-                     argumentsDict = [:] // Default to empty args if missing
-                }
-                
-                // Step 4: Create ParsedToolCall if successful
-                if let finalArgs = argumentsDict {
-                    calls.append(ParsedToolCall(function: .init(name: name, arguments: finalArgs)))
-                    print("Successfully parsed tool call: \(name)")
-                } else {
-                     print("Skipping tool call \(name) due to argument parsing failure.")
-                }
-
-            } catch {
-                // Error during JSONSerialization
-                print("Error using JSONSerialization: \(error) - JSON: \(jsonString)")
-            }
-        }
-        print("Parsed \(calls.count) calls from text within parseToolCalls func.")
-        return calls
     }
 
     // --- Tool Execution (accepts AssembledToolCall) ---
@@ -769,8 +660,8 @@ struct ChatView: View {
 
 // Separate View for Message Bubble Styling
 struct MessageView: View {
-    let message: Message
-    @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
+    @ObservedObject var message: Message
+    @Environment(\.colorScheme) var colorScheme
 
     var body: some View {
         HStack {
