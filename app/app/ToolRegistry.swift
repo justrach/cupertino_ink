@@ -1,41 +1,8 @@
 import Foundation // Needed for AnyEncodable
 
 // Helper to encode complex dictionary values like tool parameters
-struct AnyEncodable: Encodable {
-    private let value: Any
-
-    init(_ value: Any) {
-        self.value = value
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.singleValueContainer()
-        switch value {
-        case let encodable as Encodable:
-            // Check if the value itself is Encodable and encode it directly.
-            // This requires careful handling to avoid infinite recursion if AnyEncodable wraps itself.
-            // A more robust solution might involve type checking against known Encodable types.
-            try encodable.encode(to: encoder)
-        case is NSNull:
-            try container.encodeNil()
-        case let bool as Bool:
-            try container.encode(bool)
-        case let int as Int:
-            try container.encode(int)
-        case let double as Double:
-            try container.encode(double)
-        case let string as String:
-            try container.encode(string)
-        case let array as [Any]:
-             try container.encode(array.map { AnyEncodable($0) })
-        case let dictionary as [String: Any]:
-             try container.encode(dictionary.mapValues { AnyEncodable($0) })
-        default:
-            throw EncodingError.invalidValue(value, EncodingError.Context(codingPath: container.codingPath, debugDescription: "Value not encodable"))
-        }
-    }
-}
-
+// REMOVED: Moved to Models.swift
+// struct AnyEncodable: Encodable { ... entire struct ... } 
 
 // --- Tool Definitions (Simple Dictionaries) ---
 // Matches the API structure: https://platform.openai.com/docs/api-reference/chat/create#chat-create-tools
@@ -69,4 +36,5 @@ let getDeliveryDateToolDict: [String: AnyEncodable] = [
     ])
 ]
 
-let availableToolsDict: [[String: AnyEncodable]]? = [findOrderToolDict, getDeliveryDateToolDict] 
+// The availableToolsDict was already moved to Models.swift previously, but we ensure it's not redefined here.
+// let availableToolsDict: [[String: AnyEncodable]]? = [findOrderToolDict, getDeliveryDateToolDict] 

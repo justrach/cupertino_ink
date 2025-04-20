@@ -19,6 +19,15 @@ This file contains notes, ideas, and prompts for future development iterations o
     *   Added detailed logging to diagnose SSE stream processing.
     *   Adapted finalization logic to handle local server streams ending with `[DONE]` but without a `finish_reason: "stop"`.
     *   Switched `Message` to a class to resolve UI update issues potentially related to struct value semantics.
+*   **Code Structure Refactoring:** Split the large `ContentView.swift` into multiple files:
+    *   `Models.swift`: Contains `Message`, API structs (`SSEChunk`, `ChatCompletionRequestBody`, etc.), `AnyEncodable`.
+    *   `ChatViewModel.swift`: Contains the main view model logic, including SSE processing and tool execution.
+    *   `ChatView.swift`, `MessageView.swift`, `ProcessingIndicatorView.swift`: Contain the respective SwiftUI views.
+    *   `Utilities.swift`: Contains global constants (`baseURL`, `modelName`, `mockChatHistory`), extensions, and helper functions (`toggleSidebar`).
+    *   `ToolRegistry.swift`: Primarily holds tool dictionary definitions (though `availableToolsDict` was temporarily moved to `Models.swift` during refactoring, ideally should reside here).
+    *   `Color+Extensions.swift`: Holds the `Color` extension for custom app colors.
+*   **Robust Tool Call Parsing:** Enhanced `ChatViewModel.processChatInteraction` to parse tool calls directly from the response text (`<tool_call>{...}</tool_call>`) using regex as a fallback if the `finish_reason` is not `"tool_calls"`. Added the `parseToolCallsFrom` helper function.
+*   **Compiler Error Resolution:** Fixed various compiler errors in `ContentView.swift` related to `NSColor`, `ColorScheme`, and background modifiers resulting from the refactoring.
 
 ## Next Steps / Ideas
 
