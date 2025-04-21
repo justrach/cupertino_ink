@@ -6,6 +6,14 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		63D9687E2DB5EE5000519921 /* SpaceGrotesk-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63D9687D2DB5EE5000519921 /* SpaceGrotesk-Bold.ttf */; };
+		63D968802DB5EE5C00519921 /* SpaceGrotesk-Light.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63D9687F2DB5EE5C00519921 /* SpaceGrotesk-Light.ttf */; };
+		63D968822DB5EE7200519921 /* SpaceGrotesk-Medium.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63D968812DB5EE7200519921 /* SpaceGrotesk-Medium.ttf */; };
+		63D968842DB5EE8C00519921 /* SpaceGrotesk-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63D968832DB5EE8C00519921 /* SpaceGrotesk-Regular.ttf */; };
+		63D968862DB5EE9600519921 /* SpaceGrotesk-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 63D968852DB5EE9600519921 /* SpaceGrotesk-SemiBold.ttf */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		63D9DFAC2DB1E75F00D1D6A8 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -24,6 +32,11 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		63D9687D2DB5EE5000519921 /* SpaceGrotesk-Bold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SpaceGrotesk-Bold.ttf"; path = "app/Assets.xcassets/fonts/SpaceGrotesk-Bold.dataset/SpaceGrotesk-Bold.ttf"; sourceTree = "<group>"; };
+		63D9687F2DB5EE5C00519921 /* SpaceGrotesk-Light.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SpaceGrotesk-Light.ttf"; path = "app/Assets.xcassets/fonts/SpaceGrotesk-Light.dataset/SpaceGrotesk-Light.ttf"; sourceTree = "<group>"; };
+		63D968812DB5EE7200519921 /* SpaceGrotesk-Medium.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SpaceGrotesk-Medium.ttf"; path = "app/Assets.xcassets/fonts/SpaceGrotesk-Medium.dataset/SpaceGrotesk-Medium.ttf"; sourceTree = "<group>"; };
+		63D968832DB5EE8C00519921 /* SpaceGrotesk-Regular.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SpaceGrotesk-Regular.ttf"; path = "app/Assets.xcassets/fonts/SpaceGrotesk-Regular.dataset/SpaceGrotesk-Regular.ttf"; sourceTree = "<group>"; };
+		63D968852DB5EE9600519921 /* SpaceGrotesk-SemiBold.ttf */ = {isa = PBXFileReference; lastKnownFileType = file; name = "SpaceGrotesk-SemiBold.ttf"; path = "app/Assets.xcassets/fonts/SpaceGrotesk-SemiBold.dataset/SpaceGrotesk-SemiBold.ttf"; sourceTree = "<group>"; };
 		63D9DF9D2DB1E75E00D1D6A8 /* app.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = app.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		63D9DFAB2DB1E75F00D1D6A8 /* appTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = appTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		63D9DFB52DB1E75F00D1D6A8 /* appUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = appUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -75,6 +88,11 @@
 		63D9DF942DB1E75E00D1D6A8 = {
 			isa = PBXGroup;
 			children = (
+				63D968852DB5EE9600519921 /* SpaceGrotesk-SemiBold.ttf */,
+				63D968832DB5EE8C00519921 /* SpaceGrotesk-Regular.ttf */,
+				63D968812DB5EE7200519921 /* SpaceGrotesk-Medium.ttf */,
+				63D9687F2DB5EE5C00519921 /* SpaceGrotesk-Light.ttf */,
+				63D9687D2DB5EE5000519921 /* SpaceGrotesk-Bold.ttf */,
 				63D9DF9F2DB1E75E00D1D6A8 /* app */,
 				63D9DFAE2DB1E75F00D1D6A8 /* appTests */,
 				63D9DFB82DB1E75F00D1D6A8 /* appUITests */,
@@ -214,6 +232,11 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				63D968862DB5EE9600519921 /* SpaceGrotesk-SemiBold.ttf in Resources */,
+				63D968842DB5EE8C00519921 /* SpaceGrotesk-Regular.ttf in Resources */,
+				63D968822DB5EE7200519921 /* SpaceGrotesk-Medium.ttf in Resources */,
+				63D968802DB5EE5C00519921 /* SpaceGrotesk-Light.ttf in Resources */,
+				63D9687E2DB5EE5000519921 /* SpaceGrotesk-Bold.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

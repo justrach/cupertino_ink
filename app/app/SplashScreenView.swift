@@ -18,6 +18,9 @@ struct SplashScreenView: View {
     let textFadeOutDuration: Double = 0.6
     let totalDurationBeforeFinish: Double = 0.2 // Short pause after fade out
 
+    private let titleFont = "SpaceGrotesk-Bold" // Use Bold for consistency with Title Bar
+    // OR: private let titleFont = "SpaceGrotesk-Heavy" // If a heavier weight is desired/available
+
     var body: some View {
         ZStack {
             // Orange background
@@ -32,7 +35,7 @@ struct SplashScreenView: View {
                 //     .foregroundColor(.white.opacity(0.8))
 
                 Text("cupertino.ink")
-                    .font(.system(size: 60, weight: .heavy)) // Use heavy weight and larger size
+                    .font(.custom(titleFont, size: 60)) // Use custom font
                     .textCase(.lowercase)
                     .foregroundColor(.white) // Use solid white for better contrast
             // }

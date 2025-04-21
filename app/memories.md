@@ -47,6 +47,17 @@ This file contains notes, ideas, and prompts for future development iterations o
     *   Primary Accent: `nuevoOrange = Color(red: 1.0, green: 0.3, blue: 0.1)` used for interactive elements (e.g., Settings Done button).
     *   Main Background: Dynamically set in `ContentView.swift` based on system `colorScheme` (`Color.black` for dark, `NSColor.windowBackgroundColor` for light).
     *   Other custom grays also defined (`nuevoDarkGray`, `nuevoLightGray`, etc.).
+*   **UI Refinements:**
+    *   Applied "Space Grotesk" font (Regular and Bold) to `SettingsView` title and text elements.
+    *   Added a main "Settings" title (using `nuevoOrange`) to the top-left of the settings sheet.
+    *   Relocated Chat Search:
+        *   Moved search functionality from top toolbar to the sidebar.
+        *   Implemented using a manually placed `TextField` above the chat list.
+        *   Styled with `.textFieldStyle(.roundedBorder)` for standard appearance.
+    *   Added Model Picker (`fast`/`medium`/`slow`) to the top toolbar's primary actions area.
+    *   Implemented Custom Title Bar:
+        *   Initially tried hiding system title bar and adding a custom SwiftUI view.
+        *   Refactored to use `.windowStyle(.hiddenTitleBar)` and integrated custom title ("cupertino.ink" in orange) and sidebar toggle directly into `NavigationView` toolbar (`.principal` and `.navigation` placements) for correct layout.
 
 ## Next Steps / Ideas
 

@@ -3,29 +3,30 @@ import SwiftUI
 // Extracted view for Hardware specific settings
 struct HardwareSettingsView: View {
     @ObservedObject var systemMonitor: SystemMonitor // Use ObservedObject since it's passed in
+    private let customFont = "SpaceGrotesk-Regular" // Define font name
 
     var body: some View {
         // Keep vertical spacing for items within this tab
         VStack(alignment: .leading, spacing: 20) {
             Text("System Information")
-                .font(.title2) // Slightly smaller title for the tab content
+                .font(.custom(customFont, size: 20)) // Apply custom font
                 .fontWeight(.medium)
                 .padding(.bottom, 5)
             
             // VRAM Display
             VStack(alignment: .leading, spacing: 5) {
                 Text("Total GPU Memory (Unified/Dedicated)")
-                    .font(.headline)
+                    .font(.custom(customFont, size: 14)) // Apply custom font
                     .foregroundColor(.secondary)
                 HStack {
                     if let vramMB = systemMonitor.totalVRAMMB {
                         let vramGB = vramMB / 1024.0 
                         Text(String(format: "%.1f GB", vramGB))
-                            .font(.system(.body, design: .rounded).monospacedDigit())
+                            .font(.custom(customFont, size: 16).monospacedDigit()) // Apply custom font
                             .fontWeight(.semibold)
                     } else {
                         Text("Loading...")
-                            .font(.body)
+                            .font(.custom(customFont, size: 16)) // Apply custom font
                             .foregroundColor(.secondary)
                     }
                     Spacer()
@@ -41,16 +42,16 @@ struct HardwareSettingsView: View {
             // System CPU Usage Display
             VStack(alignment: .leading, spacing: 5) {
                 Text("System CPU Usage")
-                    .font(.headline)
+                    .font(.custom(customFont, size: 14)) // Apply custom font
                     .foregroundColor(.secondary)
                 HStack {
                     if let usage = systemMonitor.systemCPUUsage {
                         Text(String(format: "%.1f %%", usage * 100))
-                            .font(.system(.body, design: .rounded).monospacedDigit())
+                            .font(.custom(customFont, size: 16).monospacedDigit()) // Apply custom font
                             .fontWeight(.semibold)
                     } else {
                         Text("Loading...")
-                            .font(.body)
+                            .font(.custom(customFont, size: 16)) // Apply custom font
                             .foregroundColor(.secondary)
                     }
                     Spacer()
@@ -76,22 +77,30 @@ struct HardwareSettingsView: View {
 struct SettingsView: View {
     @StateObject private var systemMonitor = SystemMonitor()
     @Environment(\.dismiss) var dismiss
+    private let titleFont = "SpaceGrotesk-Bold" // Define font name for title
+    private let customFont = "SpaceGrotesk-Regular" // Define font name for body
 
     var body: some View {
-        // Main VStack to hold TabView and Done button
-        VStack {
+        VStack(alignment: .leading) { // Align main VStack leading for title
+            // Add Settings Title
+            Text("Settings")
+                .font(.custom(titleFont, size: 28)) // Apply custom font and size
+                .foregroundColor(.nuevoOrange) // Apply orange color
+                .padding(.leading) // Add padding to align with tab content
+                .padding(.top) // Add top padding
+
             TabView {
                 HardwareSettingsView(systemMonitor: systemMonitor)
                     .tabItem {
                         Label("Hardware", systemImage: "cpu")
                     }
                 
-                // Placeholder for future settings
                 Text("Preferences options coming soon...")
+                    .font(.custom(customFont, size: 14)) // Apply custom font
                     .padding()
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .tabItem {
-                        Label("Preferences", systemImage: "gearshape.2") 
+                        Label("Preferences", systemImage: "gearshape.2")
                     }
             }
             // TabView takes available space
@@ -102,6 +111,7 @@ struct SettingsView: View {
                 Button("Done") { 
                     dismiss() 
                 }
+                .font(.custom(customFont, size: 14)) // Apply custom font
                 .tint(.nuevoOrange) 
                 .buttonStyle(.borderedProminent) 
                 .controlSize(.large) 
@@ -112,7 +122,7 @@ struct SettingsView: View {
             .padding(.bottom) // Add padding only to bottom for the button
         }
         // Remove padding from the outer VStack, let TabView and button handle their own
-        .frame(minWidth: 400, minHeight: 350) // Adjusted frame slightly
+        .frame(minWidth: 400, minHeight: 400) // Adjusted minHeight for title
         .onAppear {
             systemMonitor.startMonitoring()
         }

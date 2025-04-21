@@ -28,5 +28,6 @@ struct appApp: App {
                 }
             }
         }
+        .windowStyle(.hiddenTitleBar) // Hide the standard title bar
     }
 }

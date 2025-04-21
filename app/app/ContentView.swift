@@ -26,12 +26,14 @@ struct ContentView: View {
     @State private var contentVisible = false // State for fade-in - RESTORED
     @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
     @State private var showingSettings = false // State for presenting the Settings sheet
+    private let titleFont = "SpaceGrotesk-Bold"
+    
+    // State for model selection
+    @State private var selectedModel: String = "medium"
+    let models = ["fast", "medium", "slow"]
 
     var body: some View {
-        // REMOVED background color variable definition
-        // let backgroundColor = colorScheme == .dark ? Color.black : Color(nsColor: NSColor.windowBackgroundColor)
-        
-        ZStack {
+        ZStack { // ZStack remains for background
             // Apply background conditionally directly within the ZStack
             if colorScheme == .dark {
                 Color.black.ignoresSafeArea()
@@ -40,11 +42,17 @@ struct ContentView: View {
             }
             
             NavigationView {
-                // Sidebar
+                // Sidebar List
                 List {
-                    // Put Section directly back into List
-                    // VStack removed
-                    Section("Chats") {
+                   // Manually add TextField above the Section
+                   TextField("Search Chats", text: $searchText)
+                       .textFieldStyle(.roundedBorder) // Restore standard border style
+                       .padding(.horizontal, 8) 
+                       .padding(.vertical, 5) 
+                       .listRowInsets(EdgeInsets(top: 0, leading: 0, bottom: 0, trailing: 0))
+                       // No custom background 
+                    
+                   Section("Chats") {
                         ForEach(filteredChats) { chat in
                             NavigationLink(destination: ChatView(historyItem: chat)) { 
                                  Text(chat.title)
@@ -52,21 +60,22 @@ struct ContentView: View {
                             }
                         }
                     }
-                    // Spacer and Button moved to safeAreaInset below
                 }
                 .listStyle(.sidebar) 
+                // Set sidebar navigation title (it won't show in title bar now)
+                // but might be used for accessibility or other contexts.
                 .navigationTitle("History") 
-                .searchable(text: $searchText, prompt: "Search Chats")
-                .safeAreaInset(edge: .bottom) { // Pin button to bottom
+                .safeAreaInset(edge: .bottom) { 
+                    // Settings button remains pinned at the bottom
                     Button {
                         showingSettings = true
                     } label: {
                         Image(systemName: "gearshape")
-                            .padding(8) // Add some padding around the icon for easier tapping
+                            .padding(8) 
                     }
                     .buttonStyle(.plain)
-                    .padding(.leading, 8) // Add padding from the left edge
-                    .frame(maxWidth: .infinity, alignment: .leading) // Force to left
+                    .padding(.leading, 8) 
+                    .frame(maxWidth: .infinity, alignment: .leading) 
                 }
                 
                 // Detail View
@@ -75,24 +84,57 @@ struct ContentView: View {
             .sheet(isPresented: $showingSettings) { 
                 SettingsView()
             }
-            .toolbar { // Add toolbar for the toggle button
-                ToolbarItem(placement: .navigation) { // Place it near the trailing edge/primary actions
-                    Button(action: toggleSidebar) { // toggleSidebar is now in Utilities.swift
+            .toolbar { 
+                // --- Toolbar Customization --- 
+                
+                // Sidebar Toggle (Leading)
+                ToolbarItem(placement: .navigation) { 
+                    Button(action: toggleSidebar) { 
                         Label("Toggle Sidebar", systemImage: "sidebar.left")
+                    }
+                    .keyboardShortcut("t", modifiers: .command) // Example shortcut
+                }
+                
+                // Custom Title (Center)
+                ToolbarItem(placement: .principal) {
+                    Text("cupertino.ink")
+                         .font(.custom(titleFont, size: 16))
+                         .foregroundColor(.nuevoOrange)
+                        // Note: Dragging should work on the window frame provided by
+                        // the system when using .hiddenTitleBar, even without the text.
+                        // If dragging is lost, we might need to revisit WindowDragView 
+                        // as an overlay on this Text or the whole toolbar content.
+                }
+                
+                // Search Field & Model Picker (Trailing)
+                ToolbarItemGroup(placement: .primaryAction) {
+                    // Remove Search Field from here
+                    // TextField("Search Chats", text: $searchText)
+                    //     .textFieldStyle(.roundedBorder)
+                    //     .frame(width: 150) 
+                        
+                    // Model Picker
+                    Picker("Model", selection: $selectedModel) {
+                        ForEach(models, id: \.self) { modelName in
+                            Text(modelName).tag(modelName)
+                        }
+                    }
+                    .pickerStyle(.menu) 
+                }
+            }
+            // Opacity and onAppear applied to the ZStack content
+            .opacity(contentVisible ? 1 : 0)
+            .onAppear {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                    withAnimation(.easeInOut(duration: 0.6)) {
+                        contentVisible = true
                     }
                 }
             }
-            .frame(minWidth: 600, minHeight: 400)
-            .opacity(contentVisible ? 1 : 0)
         }
-        // Add onAppear to trigger the fade-in - RESTORED
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                withAnimation(.easeInOut(duration: 0.6)) {
-                    contentVisible = true
-                }
-            }
-        }
+        // Frame applied to the ZStack (outermost view now)
+        .frame(minWidth: 600, minHeight: 400) 
+        // No longer need .ignoresSafeArea(.top) here
     }
 
     // Computed property to filter chat history based on search text
