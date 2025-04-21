@@ -25,6 +25,7 @@ struct ContentView: View {
     // @State private var filteredChatHistory = mockChatHistory // Use mockChatHistory from Utilities.swift
     @State private var contentVisible = false // State for fade-in - RESTORED
     @Environment(\.colorScheme) var colorScheme // Detect light/dark mode
+    @State private var showingSettings = false // State for presenting the Settings sheet
 
     var body: some View {
         // REMOVED background color variable definition
@@ -39,30 +40,40 @@ struct ContentView: View {
             }
             
             NavigationView {
-                // Sidebar - Always present in the structure for NavigationView to manage
+                // Sidebar
                 List {
-                    // Removed the top Section with "New Chat" Label
-
-                    // Section for chat history
+                    // Put Section directly back into List
+                    // VStack removed
                     Section("Chats") {
-                        // Use mockChatHistory from Utilities.swift
-                        // Filter based on searchText
-                        ForEach(filteredChats) { chat in // Use filteredChats computed property
-                            // No longer need to pass binding
+                        ForEach(filteredChats) { chat in
                             NavigationLink(destination: ChatView(historyItem: chat)) { 
                                  Text(chat.title)
                                      .lineLimit(1)
                             }
                         }
                     }
+                    // Spacer and Button moved to safeAreaInset below
                 }
                 .listStyle(.sidebar) 
                 .navigationTitle("History") 
-                // Add search functionality to the List
                 .searchable(text: $searchText, prompt: "Search Chats")
+                .safeAreaInset(edge: .bottom) { // Pin button to bottom
+                    Button {
+                        showingSettings = true
+                    } label: {
+                        Image(systemName: "gearshape")
+                            .padding(8) // Add some padding around the icon for easier tapping
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.leading, 8) // Add padding from the left edge
+                    .frame(maxWidth: .infinity, alignment: .leading) // Force to left
+                }
                 
-                // Detail View (Placeholder or initial view)
-                ChatView() // Default chat view when no history item is selected
+                // Detail View
+                ChatView() 
+            }
+            .sheet(isPresented: $showingSettings) { 
+                SettingsView()
             }
             .toolbar { // Add toolbar for the toggle button
                 ToolbarItem(placement: .navigation) { // Place it near the trailing edge/primary actions

@@ -28,11 +28,34 @@ This file contains notes, ideas, and prompts for future development iterations o
     *   `Color+Extensions.swift`: Holds the `Color` extension for custom app colors.
 *   **Robust Tool Call Parsing:** Enhanced `ChatViewModel.processChatInteraction` to parse tool calls directly from the response text (`<tool_call>{...}</tool_call>`) using regex as a fallback if the `finish_reason` is not `"tool_calls"`. Added the `parseToolCallsFrom` helper function.
 *   **Compiler Error Resolution:** Fixed various compiler errors in `ContentView.swift` related to `NSColor`, `ColorScheme`, and background modifiers resulting from the refactoring.
+*   **Settings View Implementation:**
+    *   Created `SettingsView.swift` presented as a sheet from `ContentView.swift`.
+    *   Added a settings gear icon button pinned to the bottom-left of the `ContentView` sidebar using `.safeAreaInset`.
+    *   Implemented system statistics fetching in `SystemMonitor.swift`:
+        *   Fetches Total VRAM (using `IOKit`, handling Apple Silicon unified memory by reporting total system RAM).
+        *   Fetches overall System CPU Usage (using `mach` host APIs).
+        *   Includes periodic updates via `Timer` and fixes for compiler errors/warnings.
+    *   Designed `SettingsView` UI:
+        *   Displays VRAM (GB) and CPU Usage (%) with text and a `ProgressView`.
+        *   Added a "Done" button (using app's orange theme color) to dismiss.
+        *   Improved typography and layout.
+    *   Refactored settings into tabs:
+        *   Created `HardwareSettingsView` to encapsulate hardware stats.
+        *   Used `TabView` in `SettingsView` with "Hardware" and placeholder "Preferences" tabs.
+*   **Color Definitions:**
+    *   Established custom colors in `Color+Extensions.swift`.
+    *   Primary Accent: `nuevoOrange = Color(red: 1.0, green: 0.3, blue: 0.1)` used for interactive elements (e.g., Settings Done button).
+    *   Main Background: Dynamically set in `ContentView.swift` based on system `colorScheme` (`Color.black` for dark, `NSColor.windowBackgroundColor` for light).
+    *   Other custom grays also defined (`nuevoDarkGray`, `nuevoLightGray`, etc.).
 
 ## Next Steps / Ideas
 
-- [ ] 
-- [ ] 
+- [ ] **Explore Model Context Protocol (MCP):** Investigate replacing the current hardcoded tool dictionaries (`findOrderToolDict`, etc.) and manual tool execution logic in `ChatViewModel` with MCP.
+    - Define tools using the MCP schema.
+    - Implement an MCP server or adapter within the app to handle tool execution requests from the model.
+    - This could lead to a more modular and potentially standardized way of handling tools/functions.
+- [ ] Add actual preferences to the "Preferences" tab in Settings.
+- [ ] Implement search/filtering for chat history items.
 
 ## Prompting Notes
 
