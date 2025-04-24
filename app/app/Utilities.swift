@@ -17,7 +17,7 @@ let mockChatHistory: [ChatHistoryItem] = [
 
 // --- API Configuration ---
 let baseURL = "http://127.0.0.1:10240/v1/chat/completions"
-let modelName = "mlx-community/Qwen2.5-7B-Instruct-1M-4bit" // Your model
+let modelName = "lmstudio-community/Qwen2.5-7B-Instruct-MLX-4bit" // Your model
 
 // --- Helper Extensions ---
 
