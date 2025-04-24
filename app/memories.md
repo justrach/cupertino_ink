@@ -58,6 +58,7 @@ This file contains notes, ideas, and prompts for future development iterations o
     *   Implemented Custom Title Bar:
         *   Initially tried hiding system title bar and adding a custom SwiftUI view.
         *   Refactored to use `.windowStyle(.hiddenTitleBar)` and integrated custom title ("cupertino.ink" in orange) and sidebar toggle directly into `NavigationView` toolbar (`.principal` and `.navigation` placements) for correct layout.
+*   **System Prompt Generalization:** Modified the `systemPrompt` in `ChatViewModel.swift` to allow for general conversation and direct answers, while still defining specific tool usage guidelines.
 
 ## Next Steps / Ideas
 

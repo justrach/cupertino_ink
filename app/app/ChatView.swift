@@ -9,6 +9,9 @@ struct ChatView: View {
     // Optional: Receive history item to potentially load chat
     var historyItem: ChatHistoryItem? = nil
 
+    // State for TextField focus
+    @FocusState private var isTextFieldFocused: Bool
+
     // Initializer to handle ChatViewModel creation/injection
     init(historyItem: ChatHistoryItem? = nil) {
         self.historyItem = historyItem
@@ -37,18 +40,29 @@ struct ChatView: View {
                     .padding(.horizontal)
                     .padding(.top) // Add padding at the top of the messages list
                 }
+                // --- Additions for Layout and Scrolling --- 
+                .layoutPriority(1) // Give ScrollView priority for space
+                .frame(maxHeight: .infinity) // Ensure ScrollView expands
                 // Set background based on color scheme
                 .background(colorScheme == .dark ? Color.black : Color(NSColor.windowBackgroundColor))
                 // Use viewModel.messages
                 .onChange(of: viewModel.messages) { oldValue, newValue in // Observe the whole array for changes
-                    // Ensure scrolling happens only when count increases and the last message is new
+                    // Scroll when a new message is added
                     if newValue.count > oldValue.count, let lastMessage = newValue.last {
+                        scrollToBottom(proxy: proxy, messageId: lastMessage.id)
+                    }
+                }
+                // Add onChange for the last message's text to scroll during streaming
+                .onChange(of: viewModel.messages.last?.text) { _, _ in 
+                    if viewModel.isSending, let lastMessage = viewModel.messages.last {
                         scrollToBottom(proxy: proxy, messageId: lastMessage.id)
                     }
                 }
                 .onAppear { // Scroll to bottom on initial appear
                    // Use viewModel.messages
                    scrollToBottom(proxy: proxy, messageId: viewModel.messages.last?.id)
+                   // Set initial focus to the text field
+                   isTextFieldFocused = true
                 }
             }
 
@@ -60,12 +74,13 @@ struct ChatView: View {
                     .frame(minHeight: 30)
                     // Remove specific TextField styling (background, clip, overlay)
                     .foregroundColor(colorScheme == .dark ? .nuevoLightGray : .primary)
+                    .focused($isTextFieldFocused) // Bind focus state
                     .onSubmit { // Call ViewModel's sendMessage
-                        viewModel.sendMessage()
+                        sendMessageAndRefocus()
                     }
-                    .disabled(viewModel.isSending) // Disable while sending
+                    .disabled(viewModel.isSending) // Correct: Disable ONLY while sending
 
-                Button(action: viewModel.sendMessage) { // Call ViewModel's sendMessage
+                Button(action: sendMessageAndRefocus) { // Use the helper function
                     Image(systemName: "arrow.up.circle.fill")
                         .font(.system(size: 24))
                         // Use nuevoOrange when enabled, slightly dimmer/grayer when disabled
@@ -75,6 +90,12 @@ struct ChatView: View {
                  // Use viewModel properties for disabled state
                 .disabled(viewModel.newMessageText.isEmpty || viewModel.isSending)
                 .frame(minHeight: 30) // Align height with TextField
+            }
+            // Add onChange to refocus when generation finishes
+            .onChange(of: viewModel.isSending) { _, isSending in
+                if !isSending { // If sending just finished
+                    isTextFieldFocused = true
+                }
             }
             // Apply styling to the HStack to create the 'island'
             .padding(.horizontal, 12)
@@ -103,5 +124,10 @@ struct ChatView: View {
         withAnimation(.easeOut(duration: 0.25)) { // Add animation
              proxy.scrollTo(id, anchor: .bottom)
         }
+    }
+
+    // Helper to send message and refocus TextField
+    private func sendMessageAndRefocus() {
+        viewModel.sendMessage() // Just send the message
     }
 } 
