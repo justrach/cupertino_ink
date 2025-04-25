@@ -68,6 +68,17 @@ This file contains notes, ideas, and prompts for future development iterations o
     - This could lead to a more modular and potentially standardized way of handling tools/functions.
 - [ ] Add actual preferences to the "Preferences" tab in Settings.
 - [ ] Implement search/filtering for chat history items.
+- [ ] **Implement Brave Search Tool:**
+    - Add logic to `ChatViewModel.handleToolCalls` to recognize `brave_search`.
+    - Make HTTP request to Brave Search API (`https://api.search.brave.com/res/v1/web/search`).
+    - Handle API key management (securely, not hardcoded - e.g., from settings or environment).
+    - Parse the JSON response.
+    - Format results as a tool message.
+- [ ] **Implement Summarization Tool:**
+    - Add logic to `ChatViewModel.handleToolCalls` to recognize `summarize_content`.
+    - Construct a new request to the LLM API (using current endpoint and model) with a summarization prompt and the provided `content_to_summarize`.
+    - Process the LLM's response.
+    - Format the summary as a tool message.
 
 ## Prompting Notes
 

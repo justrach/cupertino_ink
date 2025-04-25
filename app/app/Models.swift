@@ -88,6 +88,16 @@ struct ToolCallArgsGetDelivery: Decodable {
     let order_id: String
 }
 
+// NEW: Argument struct for Brave Search tool
+struct ToolCallArgsBraveSearch: Decodable {
+    let query: String
+}
+
+// NEW: Argument struct for Summarization tool
+struct ToolCallArgsSummarizeContent: Decodable {
+    let content_to_summarize: String
+}
+
 // Re-add necessary structs for parsing (if needed elsewhere, keep public)
 // This might be redundant if client-side parsing isn't implemented in Swift yet.
 // Keep it for potential future use or remove if definitely not needed.
@@ -174,6 +184,36 @@ let availableToolsDict: [[String: AnyEncodable]] = [
                 "required": ["order_id"]
             ]
         ] as [String : Any]) // Cast inner dictionary
+    ],
+    // NEW: Brave Search Tool Definition
+    [
+        "type": AnyEncodable("function"),
+        "function": AnyEncodable([
+            "name": "brave_search",
+            "description": "Searches the web using the Brave Search API for a given query.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "query": ["type": "string", "description": "The search query string."]
+                ],
+                "required": ["query"]
+            ]
+        ] as [String : Any])
+    ],
+    // NEW: Summarization Tool Definition
+    [
+        "type": AnyEncodable("function"),
+        "function": AnyEncodable([
+            "name": "summarize_content",
+            "description": "Summarizes the provided text using the language model. Useful for condensing information, like search results.",
+            "parameters": [
+                "type": "object",
+                "properties": [
+                    "content_to_summarize": ["type": "string", "description": "The text content to be summarized."]
+                ],
+                "required": ["content_to_summarize"]
+            ]
+        ] as [String : Any])
     ]
 ]
 
