@@ -1,0 +1,16 @@
+{
+    "mcpServers": {
+      "filesystem": {
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/Users/rachpradhan/Desktop",
+          "/Users/rachpradhan/Downloads"
+        ]
+      },
+      "mcp-server-macos-use": {
+        "command": "/Users/rachpradhan/projects/mcp-server-macos-use/.build/arm64-apple-macosx/release/mcp-server-macos-use"
+      }
+    }
+  }
