@@ -1,8 +1,6 @@
 import SwiftUI
 import Combine
 import Foundation // For URLSession, JSONEncoder/Decoder, Date etc.
-import MCP // Import MCP SDK
-import os.log // Use os.log
 
 // --- Placeholder for Brave Search API Key ---
 // IMPORTANT: Replace with your actual key and load securely (e.g., from Settings/Environment)
@@ -43,53 +41,48 @@ struct ChatCompletionResponse: Decodable {
 // --- Chat View Model ---
 @MainActor
 class ChatViewModel: ObservableObject {
-    // --- EnvironmentObject for MCP ---
-    @EnvironmentObject var mcpHost: MCPHost // Access the MCPHost instance
-
     @Published var messages: [Message] = [
         // Initial message or load from history
         Message(text: "Hello! How can I help you today?", isUser: false)
     ]
     @Published var newMessageText: String = ""
     @Published var isSending: Bool = false // To disable input while processing
-    @Published var errorMessage: String? = nil // To display errors to the user
 
     private var currentTask: Task<Void, Never>? = nil
-    // Access logger from MCPHost or create a specific one
-    private let logger = Logger(subsystem: "com.cupertino_ink.chat", category: "ViewModel")
     let systemPrompt = """
 You are cupertino.ink, an AI assistant designed to run locally on the user's machine.
 
 The current date is {{currentDateTime}}.
 
-    You operate **offline** and have **no access to the internet or real-time information** UNLESS you use provided tools. Your knowledge is limited to the data you were trained on. You cannot browse websites, access external databases, or retrieve current events directly.
-
-    **Available Tools:**
-    You have access to a set of tools provided via the Model Context Protocol (MCP). Use these tools when necessary to fulfill the user's request (e.g., searching the web, summarizing content). You will be given the tool descriptions. Use the `tool_calls` format when you need to invoke a tool.
+You operate **offline** and have **no access to the internet or real-time information**. Your knowledge is limited to the data you were trained on. You cannot browse websites, access external databases, or retrieve current events.
 
 **Core Functionality:**
-    *   Assist the user with tasks like analysis, question answering, math, coding, creative writing, teaching, and general discussion.
-    *   Utilize available tools when a request requires external information or specific processing (like web search or summarization).
+*   Assist the user with tasks like analysis, question answering, math, coding, creative writing, teaching, and general discussion, based **only** on the information provided in the conversation and your internal training data.
 *   When presented with problems requiring systematic thinking (math, logic), think step-by-step before providing an answer.
-    *   Use Markdown for formatting, especially for code blocks.
+*   Use Markdown for formatting, especially for code blocks. Follow standard Markdown best practices (e.g., spacing for headers, consistent list formatting).
 
 **Interaction Style:**
 *   Be helpful, accurate (within your knowledge limits), and efficient.
 *   Provide concise responses to simple questions and more thorough answers to complex ones.
-    *   If a task is ambiguous, ask clarifying questions.
-    *   Vary your language naturally.
+*   If a task is ambiguous, ask clarifying questions. Only ask the single most relevant follow-up question when necessary.
+*   Vary your language naturally, avoiding repetitive phrases or rote statements.
 *   Respond in the language the user uses or requests.
+*   Do not use unnecessary caveats like "I aim to be direct...". Respond straightforwardly.
 
 **Handling Limitations:**
-    *   If asked about events or information beyond your training data or requiring capabilities not provided by your tools, clearly state your limitations.
-    *   If asked to access URLs or external files directly, explain that you cannot perform these actions but might be able to use a tool (like `summarize_content` if provided the content or a search tool if relevant).
+*   If asked about events or information beyond your training data or requiring internet access, clearly state your limitations (local operation, no real-time data) and explain why you cannot provide the information.
+*   If asked to access URLs, links, or external files, explain that you cannot perform these actions and ask the user to provide the relevant content directly.
+*   If asked about very obscure topics, state that the information is likely outside your training data rather than attempting to guess or hallucinate. Acknowledge the limits of your knowledge base.
+*   Since you cannot access external sources, do not pretend to cite articles, papers, or books. Explain that any apparent citations would be fabricated.
 
 **Sensitive & Harmful Content:**
-    *   Provide factual information based on your training data or tool results about potentially sensitive topics if requested for educational purposes, but do not promote harmful activities.
-    *   Decline requests for assistance with harmful, illegal, unethical, or dangerous activities.
+*   Provide factual information based on your training data about potentially sensitive or risky topics if requested for educational purposes, but do not promote harmful activities. If discussing risks, clearly state them.
+*   If a user query has both a potentially harmful and a harmless interpretation, assume the harmless one. If unsure, ask for clarification.
+*   Decline requests for assistance with harmful, illegal, unethical, or dangerous activities. Explain politely that you cannot fulfill the request due to safety guidelines or your operational constraints.
 
 **Persona:**
 *   Maintain a helpful and professional assistant persona.
+*   If asked innocuous questions about preferences or experiences, you can respond hypothetically without needing to over-emphasize your AI nature, but keep it brief and relevant.
 
 You are now being connected with a human.
 """
@@ -100,189 +93,145 @@ You are now being connected with a human.
     init() {
         // 1. Get current date and time
         let now = Date()
-        // 2. Format it
+        // 2. Format it (e.g., "yyyy-MM-dd HH:mm:ss Z")
         let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss ZZZZ"
-        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss ZZZZ" // Using ISO 8601-like format
+        formatter.timeZone = TimeZone.current // Use local timezone for display in prompt
         let dateTimeString = formatter.string(from: now)
-        // 3. Replace placeholder
+
+        // 3. Replace the placeholder in the system prompt template
         let processedSystemPrompt = systemPrompt.replacingOccurrences(of: "{{currentDateTime}}", with: dateTimeString)
-        // 4. Initialize history
+
+        // 4. Initialize history with the processed prompt
         messageHistory.append(["role": "system", "content": processedSystemPrompt])
-        logger.info("ChatViewModel initialized with system prompt.")
     }
 
     func sendMessage() {
         guard !newMessageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !isSending else { return }
         let userMessageText = newMessageText
         newMessageText = ""
-        errorMessage = nil // Clear previous errors
         isSending = true
         let userMessage = Message(text: userMessageText, isUser: true)
         messages.append(userMessage)
+        // Add user message - value is String, compatible with [String: Any]
         messageHistory.append(["role": "user", "content": userMessageText])
-        logger.debug("User message added to history and UI.")
 
         currentTask?.cancel()
         currentTask = Task {
-            logger.info("Starting new chat interaction processing task.")
             await processChatInteraction()
-            if !Task.isCancelled {
-                logger.info("Chat interaction processing task finished.")
-                isSending = false
-            } else {
-                logger.info("Chat interaction processing task cancelled.")
-                // Optionally reset state if needed on cancellation
-            }
+            if !Task.isCancelled { isSending = false }
         }
     }
     
     private func processChatInteraction() async {
         var shouldContinueLoop = true
         let jsonEncoder = JSONEncoder()
-        jsonEncoder.outputFormatting = .prettyPrinted // For debugging
+        jsonEncoder.outputFormatting = .prettyPrinted // Optional: for debugging encoded JSON
         let jsonDecoder = JSONDecoder()
-        var accumulatedBotResponseText = "" // Accumulate text for final history entry
-        var currentToolCalls: [ChatCompletionRequestMessage.ToolCall] = [] // Accumulate tool calls from stream
-
-        // Ensure MCP client is ready before starting the loop
-         guard mcpHost.isClientInitialized else {
-             logger.error("MCP Host not initialized. Cannot send message.")
-             self.errorMessage = "Error: Tool system (MCP Host) is not ready."
-             await MainActor.run { isSending = false }
-             return
-         }
-
 
         while shouldContinueLoop && !Task.isCancelled {
             shouldContinueLoop = false
-            accumulatedBotResponseText = "" // Reset for each loop iteration
-            currentToolCalls = [] // Reset for each loop iteration
-
             let botResponsePlaceholderId = UUID()
-            await MainActor.run {
+            await MainActor.run { // Ensure placeholder is added on main thread before await
                  messages.append(Message(id: botResponsePlaceholderId, text: "", isUser: false))
-                logger.debug("Added placeholder message view (ID: \(botResponsePlaceholderId)).")
             }
 
-            // --- Prepare Request with MCP Tools ---
-            logger.debug("Preparing API request. Available MCP tools: \(self.mcpHost.availableTools.map { $0.name })")
-            let mcpToolsForRequest = mcpHost.availableTools.compactMap { tool -> [String: AnyEncodable]? in
-                var toolDict: [String: Any] = [:]
-                toolDict["type"] = "function" // Standard type for OpenAI API
-                var functionDict: [String: Any] = [:]
-                functionDict["name"] = tool.name
-                if let description = tool.description {
-                    functionDict["description"] = description
-                }
-                // Safely handle inputSchema - ensure it's a dictionary
-                if let inputSchema = tool.inputSchema as? [String: Any] {
-                    // Convert JSONValue if necessary, assuming direct encoding works for now
-                    functionDict["parameters"] = inputSchema
-                } else if tool.inputSchema != nil {
-                     logger.warning("Tool '\(tool.name)' has an inputSchema that is not a [String: Any] dictionary. Skipping parameters.")
-                 }
-
-                toolDict["function"] = functionDict
-
-                 // Wrap top-level dictionary values
-                 return toolDict.mapValues { AnyEncodable($0) }
-            }
-
+            // Add logging for history before API call
+            print("--- History Before API Call (Turn Start) ---")
+            do {
+                 let historyData = try JSONSerialization.data(withJSONObject: messageHistory, options: .prettyPrinted)
+                 print(String(data: historyData, encoding: .utf8) ?? "Failed to print history")
+            } catch { print("Error printing history: \(error)") }
+            print("-------------------------------------------")
 
             let messagesForRequest = messageHistory.map { dict -> [String: AnyEncodable] in
                  dict.mapValues { AnyEncodable($0) }
             }
-
             let requestBody = ChatCompletionRequestBody(
-                model: modelName,
+                model: modelName, // Assuming modelName is accessible (moved to Utilities)
                 messages: messagesForRequest,
-                // Use MCP tools if available, otherwise nil or empty array
-                tools: mcpToolsForRequest.isEmpty ? nil : mcpToolsForRequest,
-                // Let the model decide if/when to use tools
-                tool_choice: mcpToolsForRequest.isEmpty ? nil : "auto",
+                tools: availableToolsDict, // Assuming availableToolsDict is accessible (moved to Models/ToolRegistry later)
+                tool_choice: "auto",
                 stream: true
             )
-
-            guard let url = URL(string: baseURL) else {
+            guard let url = URL(string: baseURL) else { // Assuming baseURL is accessible (moved to Utilities)
                 let errorText = "Error: Invalid API URL"
-                logger.error("\(errorText)")
-                await handleProcessingError(errorText, placeholderId: botResponsePlaceholderId)
-                return // Exit if URL is invalid
+                print(errorText)
+                await MainActor.run {
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        messages[index].text = errorText
+                    } else { messages.append(Message(text: errorText, isUser: false)) }
+                }
+                isSending = false
+                return
             }
             var request = URLRequest(url: url)
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("text/event-stream", forHTTPHeaderField: "Accept") // Expect SSE
+            request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
             
             do {
                 request.httpBody = try jsonEncoder.encode(requestBody)
-                if let body = request.httpBody, let jsonString = String(data: body, encoding: .utf8) {
-                    logger.debug("API Request Body JSON: \(jsonString)")
-                }
             } catch {
                 let errorText = "Error: Failed to encode request: \(error.localizedDescription)"
-                logger.error("\(errorText)")
-                await handleProcessingError(errorText, placeholderId: botResponsePlaceholderId)
-                return // Exit on encoding error
+                print(errorText)
+                await MainActor.run {
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        messages[index].text = errorText
+                    } else { messages.append(Message(text: errorText, isUser: false)) }
+                }
+                isSending = false
+                return
             }
 
+            // No longer accumulate full response here: var accumulatedResponse = ""
             var finalFinishReason: String? = nil
-            // Tool Call Accumulation (using request struct format for easier final assembly)
-            var toolCallAccumulator: [Int: ChatCompletionRequestMessage.ToolCall] = [:] // Index -> Partial Tool Call
+            // --- Tool Call Accumulation ---
+            var toolCallAccumulator: [Int: (id: String?, name: String?, arguments: String)] = [:] // Index -> Partial Tool Call
 
-            // --- Process SSE Stream ---
             do {
-                logger.info("Starting API call to \(url.absoluteString)...")
+                 print("--- Starting API Call (Turn) ---")
                  let (bytes, response) = try await URLSession.shared.bytes(for: request)
                 
                  guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
                      let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                    // Attempt to read error body (might be difficult/incomplete with streams)
+                     // Attempt to read error body
                      var errorBody = ""
-                    // Create an async sequence from bytes to attempt reading
-//                    for try await byte in bytes { errorBody += String(format: "%c", byte)} // This blocks if stream is long
-                    logger.error("HTTP Error: \(statusCode). Response: \(response)")
-                    throw MCPHostError.serverError("HTTP Error: \(statusCode)") // Use custom error
-                }
-                logger.info("API call successful (Status Code: \(httpResponse.statusCode)). Processing stream...")
+                     // This part is tricky with streams, might not get full body easily
+                     // try await bytes.lines.reduce(into: "") { $0 += $1 }
+                     throw NSError(domain: "HTTPError", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "HTTP Error: \(statusCode). Body: \(errorBody)"]) // Simple error
+                 }
 
+                // Process the stream line by line
                 for try await line in bytes.lines {
-                    if Task.isCancelled {
-                         logger.info("Task cancelled during stream processing.")
-                         throw CancellationError()
-                    }
-                    logger.trace("[SSE Raw Line]: \(line)")
+                    print("[SSE Raw Line]: \(line)") // Corrected syntax
+                    guard !Task.isCancelled else { throw CancellationError() }
                     if line.hasPrefix("data:") {
                         let dataString = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
-                         guard !dataString.isEmpty else { continue }
-                        logger.trace("[SSE Data String]: \(dataString)")
-
-                        if dataString == "[DONE]" {
-                            logger.info("[SSE Signal]: Received [DONE]. Stream finished.")
-                            break // Exit stream processing loop
-                        }
-
-                        guard let data = dataString.data(using: .utf8) else {
-                            logger.warning("Failed to convert SSE data string to Data.")
-                            continue
+                        print("[SSE Data String]: \(dataString)") // Corrected syntax
+                        guard let data = dataString.data(using: .utf8), !data.isEmpty else { continue }
+                        if String(data: data, encoding: .utf8) == "[DONE]" {
+                             print("[SSE Signal]: Received [DONE]")
+                             break
                         }
                         
                         do {
                             let chunk = try jsonDecoder.decode(SSEChunk.self, from: data)
-                             logger.trace("[SSE Decoded Chunk]: \(String(describing: chunk))")
+                            print("[SSE Decoded Chunk]: \(chunk)") // Corrected syntax
                             if let choice = chunk.choices?.first {
-                                if let reason = choice.finish_reason { finalFinishReason = reason; logger.debug("Received finish_reason: \(reason)") }
+                                print("[SSE Decoded Delta]: \(choice.delta)") // Corrected syntax
+                                // Store finish reason when available
+                                if let reason = choice.finish_reason { finalFinishReason = reason }
 
                                 // -- Handle Content Delta --
                                 if let contentDelta = choice.delta.content, !contentDelta.isEmpty {
-                                    accumulatedBotResponseText += contentDelta // Accumulate for history
                                     await MainActor.run {
                                         if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                                            // Now that Message is a class and text is @Published,
+                                            // directly modifying the property should trigger UI update.
                                             messages[index].text += contentDelta 
-                                            logger.trace("Appended content delta to message ID \(botResponsePlaceholderId)")
                                         } else {
-                                            logger.warning("Could not find placeholder message ID \(botResponsePlaceholderId) to stream content.")
+                                            print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to stream content.")
                                         }
                                     }
                                 }
@@ -291,186 +240,325 @@ You are now being connected with a human.
                                 if let toolCallChunks = choice.delta.tool_calls {
                                      for chunk in toolCallChunks {
                                         let index = chunk.index
-                                        var currentCall = toolCallAccumulator[index] ?? .init(id: "", type: "function", function: .init(name: "", arguments: ""))
+                                        // Get or create the accumulator entry
+                                        var currentCall = toolCallAccumulator[index] ?? (id: nil, name: nil, arguments: "")
 
-                                        if let id = chunk.id, !id.isEmpty { currentCall.id = id }
+                                        if let id = chunk.id { currentCall.id = id }
                                         if let function = chunk.function {
-                                            if let name = function.name, !name.isEmpty { currentCall.function.name = name }
-                                            if let argsChunk = function.arguments { currentCall.function.arguments += argsChunk }
+                                            if let name = function.name { currentCall.name = name }
+                                            if let argsChunk = function.arguments { currentCall.arguments += argsChunk }
                                         }
                                         toolCallAccumulator[index] = currentCall
-                                        logger.trace("Accumulated tool call chunk for index \(index): \(currentCall)")
                                     }
                                 }
                             }
-                        } catch {
-                             logger.warning("Failed to decode SSE chunk: \(error.localizedDescription). Data: \(dataString)")
-                             // Decide whether to continue or stop on decode error
-                             continue
-                        }
-                    }
-                } // End of stream processing loop
-
-                // --- Finalize Bot Message ---
-                logger.info("Stream processing complete. Finalizing bot response.")
-                await MainActor.run {
-                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
-                        // Ensure text is finalized even if stream was empty/only tool calls
-                        if messages[index].text.isEmpty && !accumulatedBotResponseText.isEmpty {
-                             messages[index].text = accumulatedBotResponseText
-                        }
-                        logger.info("Finalized bot message view (ID: \(botResponsePlaceholderId)) with text: "\(messages[index].text)"")
-
-                        // Add the complete assistant message to history (even if empty, role matters)
-                        var assistantMessagePayload: [String: Any] = ["role": "assistant"]
-                        if !accumulatedBotResponseText.isEmpty {
-                             assistantMessagePayload["content"] = accumulatedBotResponseText
-                        }
-
-                         // Assemble complete tool calls from accumulator
-                        currentToolCalls = toolCallAccumulator.sorted { $0.key < $1.key }.map { $0.value }
-
-                         if !currentToolCalls.isEmpty {
-                             // Convert ToolCall struct to dictionary format expected by history/API
-                             let toolCallsForHistory = currentToolCalls.map { tc -> [String: String] in
-                                 ["id": tc.id, "type": tc.type, "function_name": tc.function.name, "function_arguments": tc.function.arguments] // Adjust keys as needed by your API/history format
-                             }
-                             assistantMessagePayload["tool_calls"] = toolCallsForHistory // Add assembled tool calls
-                             logger.info("Adding tool calls to assistant history message: \(toolCallsForHistory)")
-                    } else {
-                            logger.debug("No tool calls received in this turn.")
-                         }
-
-
-                        if assistantMessagePayload.count > 1 { // Only add if there's content or tool calls
-                            messageHistory.append(assistantMessagePayload)
-                            logger.debug("Added assistant message payload to history.")
-                        } else {
-                             logger.warning("Assistant message payload was empty (no content or tool calls), not added to history.")
-                        }
-
-
-                    } else {
-                        logger.error("Failed to find placeholder message ID \(botResponsePlaceholderId) after stream.")
-                        // Handle error case - maybe add a new error message?
+                        } catch { print("SSE Decode Error: \(error) for data: \(String(data: data, encoding: .utf8) ?? "invalid utf8")") }
                     }
                 }
-
-                // --- Handle Tool Calls via MCP ---
-                if finalFinishReason == "tool_calls" && !currentToolCalls.isEmpty {
-                    logger.info("Finish reason is 'tool_calls'. Handling \(currentToolCalls.count) tool calls via MCP.")
-                    shouldContinueLoop = true // Signal to loop again after handling tools
-
-                    for toolCall in currentToolCalls {
-                         guard !Task.isCancelled else { throw CancellationError() }
-                         logger.info("Processing tool call: ID=\(toolCall.id), Name=\(toolCall.function.name)")
-
-                        // 1. Decode Arguments String to [String: Sendable]
-                        var decodedArgs: [String: Sendable] = [:]
-                         if let argsData = toolCall.function.arguments.data(using: .utf8) {
-                             do {
-                                 // Attempt to decode as [String: Any], then cast values if necessary
-                                 if let jsonObject = try JSONSerialization.jsonObject(with: argsData, options: []) as? [String: Any] {
-                                      // Basic check for Sendable compatibility (String, Int, Double, Bool, Array, Dictionary)
-                                      // This is a simplification; true Sendable check is complex.
-                                      decodedArgs = jsonObject.compactMapValues { $0 as? Sendable } // Attempt direct cast
-                                      if decodedArgs.count != jsonObject.count {
-                                           logger.warning("Some arguments for tool '\(toolCall.function.name)' might not be Sendable. Proceeding with compatible ones.")
-                                      }
-                                      logger.debug("Decoded arguments for tool '\(toolCall.function.name)': \(decodedArgs)")
-                             } else {
-                                     logger.error("Failed to decode arguments JSON for tool '\(toolCall.function.name)' into a dictionary.")
-                                     // Handle error - maybe add a tool error message to history?
-                                     continue // Skip this tool call
-                                 }
-                             } catch {
-                                 logger.error("Failed to decode JSON arguments for tool '\(toolCall.function.name)': \(error.localizedDescription). Arguments string: \(toolCall.function.arguments)")
-                                 // Handle error - maybe add a tool error message to history?
-                                 continue // Skip this tool call
-                             }
-                              } else {
-                             logger.warning("Tool call arguments string is empty or invalid UTF-8 for tool '\(toolCall.function.name)'.")
-                             // Proceed with empty arguments if appropriate for the tool, or handle as error.
-                         }
-
-
-                        // 2. Call MCP Host
-                        do {
-                             let (content, isError) = try await mcpHost.callTool(name: toolCall.function.name, arguments: decodedArgs)
-                             logger.info("MCP tool '\(toolCall.function.name)' executed. IsError: \(isError). Result: \(content)")
-
-                            // 3. Add Tool Result to History
-                            // Ensure content is not excessively long? Add truncation if needed.
-                             let toolResultMessage: [String: Any] = [
-                                 "tool_call_id": toolCall.id,
-                                 "role": "tool",
-                                 "name": toolCall.function.name,
-                                 "content": isError ? "Error: \(content)" : content // Prepend Error prefix if needed
-                             ]
-                             messageHistory.append(toolResultMessage)
-                             logger.debug("Added tool result message to history for ID \(toolCall.id).")
-
-                        } catch let mcpError as MCPHostError {
-                             logger.error("MCP Host Error calling tool '\(toolCall.function.name)': \(mcpError.localizedDescription)")
-                             // Add specific error message to history
-                             let toolErrorMessage: [String: Any] = [
-                                 "tool_call_id": toolCall.id, "role": "tool", "name": toolCall.function.name,
-                                 "content": "Error executing tool: \(mcpError.localizedDescription)"
-                             ]
-                             messageHistory.append(toolErrorMessage)
-                    } catch {
-                             logger.error("Unexpected error calling tool '\(toolCall.function.name)' via MCP: \(error.localizedDescription)")
-                             // Add generic error message to history
-                             let toolErrorMessage: [String: Any] = [
-                                 "tool_call_id": toolCall.id, "role": "tool", "name": toolCall.function.name,
-                                 "content": "Error: An unexpected error occurred while executing the tool."
-                             ]
-                             messageHistory.append(toolErrorMessage)
-                        }
-                    }
-                     logger.info("Finished processing all tool calls for this turn.")
-                } else {
-                    logger.info("No tool calls to handle for this turn (Finish Reason: \(finalFinishReason ?? "nil")).")
-                }
+                print("Stream processing finished. Final Reason: \(finalFinishReason ?? "N/A")")
 
             } catch is CancellationError {
-                 logger.info("Chat interaction task was cancelled.")
-                 await MainActor.run { isSending = false } // Ensure sending state is reset
-                 // Don't add error message for cancellation
-                 return // Exit cleanly
-            } catch {
-                let errorText = "Error processing chat: \(error.localizedDescription)"
-                logger.error("\(errorText)")
-                await handleProcessingError(errorText, placeholderId: botResponsePlaceholderId)
-                // Loop should not continue on error
-                shouldContinueLoop = false
+                 print("Task Cancelled during stream.")
+                 shouldContinueLoop = false // Ensure loop terminates if cancelled
+            } catch { // Handle URLSession errors, HTTP errors, etc.
+                 print("Network/Stream Error: \(error)")
+                 let errorText = "Error: \(error.localizedDescription)"
+                 await MainActor.run {
+                     if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                         messages[index].text = errorText // Update placeholder with error
+                     } else {
+                         messages.append(Message(text: errorText, isUser: false))
+                     }
+                 }
+                 shouldContinueLoop = false
             }
-        } // End of while loop
 
-        // Final state update after loop finishes (either normally or due to cancellation/error handled inside)
-        if !Task.isCancelled {
-            await MainActor.run { isSending = false }
-            logger.info("Chat interaction loop finished.")
-        }
-    }
+            // --- Assemble Final Tool Calls (if any) ---
+            var assembledToolCalls: [AssembledToolCall] = []
+            var treatAsNormalCompletion = true // Assume normal completion unless tools are called
 
-    // Helper to handle errors consistently
-    private func handleProcessingError(_ errorText: String, placeholderId: UUID) async {
-         await MainActor.run {
-            if let index = messages.firstIndex(where: { $0.id == placeholderId }) {
-                messages[index].text = errorText // Show error in placeholder
+            if finalFinishReason == "tool_calls" || !toolCallAccumulator.isEmpty { // Also handle if accumulator has data even without explicit finish_reason
+                print("[Tool Call Source]: Stream finish_reason ('\(finalFinishReason ?? "N/A")') or accumulator has data.")
+                treatAsNormalCompletion = false // It's not a normal completion if tools were involved
+
+                for (index, partialCall) in toolCallAccumulator.sorted(by: { $0.key < $1.key }) { // Ensure order
+                    guard let id = partialCall.id, let name = partialCall.name else {
+                         print("Warning: Incomplete tool call data at index \(index): ID ('\(partialCall.id ?? "nil")') or Name ('\(partialCall.name ?? "nil")') missing. Arguments: '\(partialCall.arguments)'")
+                         continue // Skip incomplete tool calls
+                    }
+                    assembledToolCalls.append(AssembledToolCall(index: index, id: id, functionName: name, arguments: partialCall.arguments))
+                }
+
+                // NEW: Add the assistant message with tool calls to history *before* handling them
+                let assistantMessageWithToolCalls: [String: Any] = [
+                    "role": "assistant",
+                    "content": NSNull(), // Use NSNull for nil content when there are tool calls
+                    "tool_calls": assembledToolCalls.map { call in // Map AssembledToolCall back to API format
+                        [
+                            "id": call.id,
+                            "type": "function",
+                            "function": [
+                                "name": call.functionName,
+                                "arguments": call.arguments // Arguments are already a JSON string
+                            ]
+                        ]
+                    }
+                ]
+                messageHistory.append(assistantMessageWithToolCalls)
+            
+                // --- Handle Assembled Tool Calls ---
+                if !assembledToolCalls.isEmpty {
+                    print("Handling \(assembledToolCalls.count) assembled tool call(s)...")
+                    await handleToolCalls(assembledToolCalls) // Call the new handler function
+                    shouldContinueLoop = true // Signal to loop back and call the LLM again with tool results
+                } else {
+                     print("No valid tool calls assembled despite finish_reason/accumulator data.")
+                     shouldContinueLoop = false // Don't loop if no tools were actually executed
+                }
+
             } else {
-                messages.append(Message(text: errorText, isUser: false)) // Add as new message if placeholder gone
+                // --- Handle Normal Completion (No Tool Calls) ---
+                print("Processing as normal completion (no tool calls detected).")
+                treatAsNormalCompletion = true
+                shouldContinueLoop = false // End the loop after a normal response
             }
-            self.errorMessage = errorText // Set published error message for potential UI display
-            isSending = false // Ensure input is re-enabled
+
+            // --- Finalize Assistant Message in UI and History ---
+            if treatAsNormalCompletion {
+                await MainActor.run {
+                    if let index = messages.firstIndex(where: { $0.id == botResponsePlaceholderId }) {
+                        let finalMessageContent = messages[index].text
+                         print("Finalizing normal assistant message in history: \(finalMessageContent)")
+                        // Only add non-empty final message to history
+                        if !finalMessageContent.isEmpty {
+                             messageHistory.append(["role": "assistant", "content": finalMessageContent])
+                        } else if messages.count > 1 && messages[messages.count - 2].isUser {
+                             // Handle cases where the stream might end without content (e.g., error or empty response)
+                             // Avoid adding an empty assistant message if the last one was user's
+                             print("Warning: Empty assistant message content after normal completion.")
+                             // Optionally remove the empty placeholder from UI if desired
+                             // messages.remove(at: index)
+                        }
+                    } else {
+                         print("Error: Could not find placeholder message ID \(botResponsePlaceholderId) to finalize history.")
+                              }
+                         }
+                     }
+
+            // Add logging for history after API call/tool handling
+            print("--- History After API Call/Tools (Turn End) ---")
+            do {
+                 let historyData = try JSONSerialization.data(withJSONObject: messageHistory, options: .prettyPrinted)
+                 print(String(data: historyData, encoding: .utf8) ?? "Failed to print history")
+            } catch { print("Error printing history: \(error)") }
+            print("-------------------------------------------")
+
+            // Reset task state only if the loop isn't continuing due to tool calls
+            if !shouldContinueLoop {
+                 isSending = false
+                 currentTask = nil
+            }
+            
+            print("End of processChatInteraction loop. Continue = \(shouldContinueLoop)")
+
+        } // End while loop
+
+         // Ensure sending state is reset if the loop terminates unexpectedly or task is cancelled
+         if Task.isCancelled {
+             print("Task cancelled, resetting sending state.")
+             isSending = false
+         }
+         // Final check to ensure isSending is false if loop finishes
+         if !shouldContinueLoop {
+             isSending = false
+         }
+    }
+
+    // NEW: Function to handle tool execution
+    private func handleToolCalls(_ calls: [AssembledToolCall]) async {
+        let jsonDecoder = JSONDecoder()
+
+        for call in calls {
+            var toolResultContent: String = "" // Content to send back to the model
+
+            print("Executing Tool: \(call.functionName), ID: \(call.id)")
+            do {
+                guard let argumentsData = call.arguments.data(using: .utf8) else {
+                    throw NSError(domain: "ToolError", code: 1, userInfo: [NSLocalizedDescriptionKey: "Failed to encode arguments to Data"])
+                }
+
+                switch call.functionName {
+                case "find_order_by_name":
+                    let args = try jsonDecoder.decode(ToolCallArgsFindOrder.self, from: argumentsData)
+                    // --- Placeholder: Implement actual find_order_by_name logic ---
+                    print("  Args: customer_name=\(args.customer_name)")
+                    // Replace with actual logic (e.g., database lookup)
+                    let mockOrderId = "ORDER-\(String(abs(args.customer_name.hashValue)).prefix(6))"
+                    toolResultContent = "{\"order_id\": \"\(mockOrderId)\"}"
+                    // --- End Placeholder ---
+
+                case "get_delivery_date":
+                    let args = try jsonDecoder.decode(ToolCallArgsGetDelivery.self, from: argumentsData)
+                    // --- Placeholder: Implement actual get_delivery_date logic ---
+                    print("  Args: order_id=\(args.order_id)")
+                    // Replace with actual logic (e.g., API call, database lookup)
+                    let formatter = DateFormatter()
+                    formatter.dateStyle = .medium
+                    let deliveryDate = Calendar.current.date(byAdding: .day, value: 3, to: Date())!
+                    toolResultContent = "{\"estimated_delivery_date\": \"\(formatter.string(from: deliveryDate))\"}"
+                    // --- End Placeholder ---
+
+                case "brave_search":
+                    // --- Implement Brave Search ---
+                     print("Decoding Brave Search Args...")
+                    let args = try jsonDecoder.decode(ToolCallArgsBraveSearch.self, from: argumentsData)
+                     print("  Args: query=\(args.query)")
+
+                    guard !braveSearchAPIKey.isEmpty && braveSearchAPIKey != "YOUR_BRAVE_API_KEY_HERE" else {
+                        print("Error: Brave Search API Key not configured.")
+                        toolResultContent = "{\"error\": \"Brave Search API Key not configured.\"}"
+                        break // Break from switch case for this tool
+                    }
+
+                    guard var urlComponents = URLComponents(string: "https://api.search.brave.com/res/v1/web/search") else {
+                        print("Error: Invalid Brave Search API base URL.")
+                        toolResultContent = "{\"error\": \"Internal configuration error (invalid URL).\"}"
+                        break
+                    }
+                    urlComponents.queryItems = [URLQueryItem(name: "q", value: args.query)]
+                    // Add other params like count, safesearch if needed
+
+                    guard let url = urlComponents.url else {
+                        print("Error: Could not create Brave Search URL with query items.")
+                        toolResultContent = "{\"error\": \"Internal configuration error (URL creation failed).\"}"
+                        break
+                    }
+
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "GET" // Brave Search uses GET
+                    request.setValue("application/json", forHTTPHeaderField: "Accept")
+                    request.setValue("gzip", forHTTPHeaderField: "Accept-Encoding")
+                    request.setValue(braveSearchAPIKey, forHTTPHeaderField: "X-Subscription-Token")
+
+                    print("  Making Brave Search API Call...")
+                    do {
+                        let (data, response) = try await URLSession.shared.data(for: request)
+                        guard let httpResponse = response as? HTTPURLResponse else {
+                             throw NSError(domain: "NetworkError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid response type"])
+                 }
+                        
+                        print("  Brave Search Response Status Code: \(httpResponse.statusCode)")
+
+                        if (200...299).contains(httpResponse.statusCode) {
+                             let searchResponse = try jsonDecoder.decode(BraveSearchResponse.self, from: data)
+                             print("  Brave Search Response Decoded.")
+                            // Format results concisely
+                            var resultsString = "Search Results for '\(args.query)':\n"
+                            if let webResults = searchResponse.web?.results, !webResults.isEmpty {
+                                for (index, result) in webResults.prefix(5).enumerated() { // Limit to top 5 results
+                                     resultsString += "\n\(index + 1). \(result.title ?? "No Title")"
+                                     resultsString += "\n   URL: \(result.url ?? "No URL")"
+                                     resultsString += "\n   Snippet: \(result.description ?? "No Snippet")\n"
+                                }
+                            } else {
+                                 resultsString += "\nNo results found."
+                            }
+                             toolResultContent = try String(data: JSONEncoder().encode(["results": resultsString]), encoding: .utf8) ?? "{\"error\": \"Failed to encode search results string\"}";
+                        } else {
+                             let errorBody = String(data: data, encoding: .utf8) ?? "Could not decode error body"
+                             print("  Brave Search API Error (Status \(httpResponse.statusCode)): \(errorBody)")
+                            toolResultContent = "{\"error\": \"Brave Search API failed with status \(httpResponse.statusCode). Details: \(errorBody)\"}"
+                        }
+                    } catch {
+                         print("  Brave Search URLSession/Decoding Error: \(error)")
+                        toolResultContent = "{\"error\": \"Failed to execute Brave Search: \(error.localizedDescription)\"}"
+                    }
+                    // --- End Brave Search ---
+
+                case "summarize_content":
+                    // --- Implement Summarization ---
+                     print("Decoding Summarize Args...")
+                    let args = try jsonDecoder.decode(ToolCallArgsSummarizeContent.self, from: argumentsData)
+                     print("  Args: content_to_summarize length=\(args.content_to_summarize.count)")
+                    
+                    let summarizationPrompt = "Please summarize the following content concisely:\n\n---\n\n\(args.content_to_summarize)\n\n---\n\nSummary:"
+
+                    // Prepare request for the *same* LLM API
+                    let summarizationMessages: [[String: AnyEncodable]] = [
+                        ["role": AnyEncodable("system"), "content": AnyEncodable("You are a helpful summarization assistant.")],
+                        ["role": AnyEncodable("user"), "content": AnyEncodable(summarizationPrompt)]
+                    ]
+                    let summarizationRequestBody = ChatCompletionRequestBody(
+                        model: modelName,
+                        messages: summarizationMessages,
+                        tools: nil, // No tools for summarization call
+                        tool_choice: nil, // No tool choice
+                        stream: false // Request non-streaming response for simplicity
+                    )
+
+                    guard let url = URL(string: baseURL) else {
+                        print("Error: Invalid API URL for summarization.")
+                        toolResultContent = "{\"error\": \"Internal configuration error (invalid URL for summarization).\"}"
+                        break
+                    }
+                    var request = URLRequest(url: url)
+                    request.httpMethod = "POST"
+                    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                    request.setValue("application/json", forHTTPHeaderField: "Accept") // Expect JSON back
+
+                    do {
+                         request.httpBody = try JSONEncoder().encode(summarizationRequestBody)
+                         print("  Making Summarization API Call...")
+                         let (data, response) = try await URLSession.shared.data(for: request)
+                         guard let httpResponse = response as? HTTPURLResponse else {
+                             throw NSError(domain: "NetworkError", code: 0, userInfo: [NSLocalizedDescriptionKey: "Invalid response type"])
+                        }
+                         
+                         print("  Summarization Response Status Code: \(httpResponse.statusCode)")
+
+                         if (200...299).contains(httpResponse.statusCode) {
+                             let summaryResponse = try jsonDecoder.decode(ChatCompletionResponse.self, from: data)
+                             if let summary = summaryResponse.choices?.first?.message?.content {
+                                 print("  Summarization Response Decoded. Summary length: \(summary.count)")
+                                 toolResultContent = try String(data: JSONEncoder().encode(["summary": summary]), encoding: .utf8) ?? "{\"error\": \"Failed to encode summary string\"}"
+                             } else {
+                                 print("  Error: Could not extract summary content from LLM response.")
+                                 toolResultContent = "{\"error\": \"Failed to get summary from the model response.\"}"
+                             }
+                              } else {
+                             let errorBody = String(data: data, encoding: .utf8) ?? "Could not decode error body"
+                             print("  Summarization API Error (Status \(httpResponse.statusCode)): \(errorBody)")
+                             toolResultContent = "{\"error\": \"Summarization API failed with status \(httpResponse.statusCode). Details: \(errorBody)\"}"
+                         }
+                    } catch {
+                         print("  Summarization URLSession/Encoding/Decoding Error: \(error)")
+                         toolResultContent = "{\"error\": \"Failed to execute summarization: \(error.localizedDescription)\"}"
+                    }
+                    // --- End Summarization ---
+
+                default:
+                    print("  Warning: Unknown tool function name '\(call.functionName)'")
+                    toolResultContent = "{\"error\": \"Unknown tool function name encountered.\"}"
+                }
+
+            } catch {
+                print("Error decoding arguments or processing tool \(call.functionName): \(error)")
+                toolResultContent = "{\"error\": \"Failed to decode arguments for tool \(call.functionName): \(error.localizedDescription)\"}"
+            }
+
+            // --- Append Tool Result to History ---
+            // Ensure content is valid JSON string before adding (it should be by now)
+            let toolMessage: [String: Any] = [
+                "role": "tool",
+                "tool_call_id": call.id,
+                "content": toolResultContent // This should be a JSON string representing the result
+            ]
+            messageHistory.append(toolMessage)
+            print("Appended result for Tool ID \(call.id) to history.")
         }
     }
 
-    // --- Remove Old/Redundant Tool Handling Functions ---
-    // Remove handleBraveSearch, handleSummarization, parseToolCallsFrom, etc.
-    // They are now replaced by the MCP handling logic.
-}
-
-// ... (Keep ChatCompletionRequestBody, SSEChunk, etc. definitions if they are still in this file) ...
-// ... (Ensure AnyEncodable is available, likely moved to Models.swift or Utilities.swift) ...
+    func cancelStreaming() {
+        // ... existing code ...
+    } // End Class
+} 
